@@ -1,0 +1,120 @@
+"""Configuration for the Hermes Claude Code plugin.
+
+All knobs are read from the environment with sane localhost-only defaults.
+Nothing here imports Hermes or the Claude SDK so it is safe to load in any
+context (plugin register, proxy subprocess, tests).
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+
+PROVIDER_NAME = "hermes-claude-code"
+PROVIDER_ALIASES = ("claude-code", "hermes_claude_code")
+DISPLAY_NAME = "Claude Code"
+DESCRIPTION = "Claude Code via local OpenAI-compatible Hermes bridge"
+# Env var the Hermes auth layer can use to override the proxy base URL.
+BASE_URL_ENV_VAR = "HERMES_CLAUDE_CODE_BASE_URL"
+# Non-empty placeholder key. The proxy is a local trusted endpoint and needs no
+# real credential, but the OpenAI SDK rejects an empty api_key string.
+LOCAL_API_KEY = "hermes-claude-code-local"
+
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 35345
+# Model names shown to Hermes users. Keep these aligned with Claude/claude.ai
+# public product names, but omit the redundant "Claude" prefix because the
+# provider row is already named "Claude Code".
+DEFAULT_MODELS = (
+    "Fable 5",
+    "Opus 4.8",
+    "Sonnet 4.6",
+    "Haiku 4.5",
+)
+# Claude Code needs CLI/API selector values, not human display names.
+MODEL_ID_ALIASES = {
+    "Fable 5": "claude-fable-5",
+    "Opus 4.8": "claude-opus-4-8",
+    "Sonnet 4.6": "claude-sonnet-4-6",
+    "Haiku 4.5": "claude-haiku-4-5-20251001",
+}
+FALLBACK_MODELS = DEFAULT_MODELS
+MODEL_OWNER = "anthropic-claude-code"
+
+
+def hermes_home() -> Path:
+    """Return the Hermes home directory ($HERMES_HOME or ~/.hermes)."""
+    env = os.environ.get("HERMES_HOME")
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / ".hermes"
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+@dataclass
+class Config:
+    """Resolved runtime configuration for proxy + bridge."""
+
+    host: str = DEFAULT_HOST
+    port: int = DEFAULT_PORT
+    # "strict" = surface tool calls back to Hermes (default, best compat).
+    # "agentic" = let Claude Code run tools internally via MCP.
+    mode: str = "strict"
+    cwd: str | None = None
+    request_timeout: float = 600.0
+    startup_timeout: float = 30.0
+    fallback_models: tuple = FALLBACK_MODELS
+    models: tuple = DEFAULT_MODELS
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.host}:{self.port}/v1"
+
+    @property
+    def health_url(self) -> str:
+        return f"http://{self.host}:{self.port}/health"
+
+    @property
+    def run_dir(self) -> Path:
+        return hermes_home() / "run"
+
+    @property
+    def lock_file(self) -> Path:
+        return self.run_dir / "hermes-claude-code.lock"
+
+    @property
+    def pid_file(self) -> Path:
+        return self.run_dir / "hermes-claude-code.pid"
+
+
+def get_config() -> Config:
+    """Build a Config from the current environment."""
+    return Config(
+        host=os.environ.get("HERMES_CLAUDE_CODE_HOST", DEFAULT_HOST),
+        port=_env_int("HERMES_CLAUDE_CODE_PORT", DEFAULT_PORT),
+        mode=os.environ.get("HERMES_CLAUDE_CODE_MODE", "strict").strip().lower()
+        or "strict",
+        cwd=os.environ.get("HERMES_CLAUDE_CODE_CWD") or None,
+        request_timeout=_env_float("HERMES_CLAUDE_CODE_TIMEOUT", 600.0),
+        startup_timeout=_env_float("HERMES_CLAUDE_CODE_STARTUP_TIMEOUT", 30.0),
+    )
