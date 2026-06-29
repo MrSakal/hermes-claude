@@ -191,31 +191,37 @@ használni, **nem** API kulcsot, és a token‑alapú „extra usage" (túlhaszn
 
 - **Hermes → lokális proxy**: a `ProviderProfile` „api_key"‑e csak placeholder,
   a localhost proxy eldobja. Semmi köze a Claude számlázásához. (Lásd lent #1.)
-- **Bridge → Anthropic**: itt számít az előfizetés. Tények:
-  - **`ANTHROPIC_API_KEY` mindig felülírja az előfizetést** és API‑áron számláz.
-    → A bridge subprocess környezetéből **ki kell venni** (strip), és a placeholdert
-    **soha** nem szabad `ANTHROPIC_API_KEY` néven a subprocessbe szivárogtatni.
-  - Headless előfizetéses út: **`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`**
-    env‑var (Pro/Max/Team/Enterprise). **`--bare` módban NEM olvasódik be** → a
-    bridge ne használjon `--bare`‑t.
-  - **Kockázat (őszintén):** az Anthropic a harmadik fél eszközöket (Hermes az
-    SDK‑n át) Pro/Max‑on token‑alapon, extra‑usage‑ként számlázhatja; az Agent SDK
-    dokumentáltan API‑kulcsot vár (claude‑agent‑sdk‑python #559), és van nyitott
-    bug, hogy `claude -p` OAuth‑tal mégis API‑usage‑ként számláz (claude‑code
-    #43333). Hogy extra‑usage **nélkül** működik‑e, az Anthropic oldali politika,
-    nem kódkérdés — egy próbahívással + `claude /status`‑szal kell ellenőrizni.
+- **Bridge → Anthropic**: itt számít az előfizetés.
 
-**Döntések (alap):**
-- **Backend default: `claude` CLI a `claude login` OAuth‑fiókkal** (legközelebb a
-  natív előfizetéses használathoz). Headless esetre `CLAUDE_CODE_OAUTH_TOKEN`
-  támogatás. Az Agent SDK csak opcionális (env‑flaggel), mert API‑kulcsot vár /
-  extra‑usage‑et válthat ki.
-- **`ANTHROPIC_API_KEY` kezelése: strip + warn.** A proxy a bridge subprocess
-  env‑jéből kiveszi (`env.pop("ANTHROPIC_API_KEY")`), és a `doctor` figyelmeztet,
-  ha jelen van (mert csendben API‑áron számlázna).
-- **`doctor` átírása:** ne az `ANTHROPIC_API_KEY`‑t tekintse „auth OK"‑nak, hanem
-  a `claude` OAuth login meglétét (`claude auth status` / `/status`). Az API kulcs
-  jelenléte **figyelmeztetés**, nem zöld pipa.
+**A JELENLEGI MEGOLDÁS MÁR JÓ (igazolva a kódból).** A repó **auth‑agnosztikus**:
+- `bridge.py` a CLI‑t `create_subprocess_exec(*cmd, …)`‑szal indítja **`env=`
+  nélkül** → örökli a környezetet; a parancs `claude -p …` (**nincs `--bare`,
+  nincs `--api-key`**).
+- A SDK‑út (`claude_agent_sdk.query`) sem ad át kulcsot — a háttérben a `claude`
+  bináris hitelesítését (a `claude login` OAuth credential store) használja.
+- `proxy.py` Popen szintén `env=` nélkül indul → örökli a környezetet.
+- Sehol nincs `ANTHROPIC_API_KEY` beállítás; a `LOCAL_API_KEY` csak a Hermes→proxy
+  placeholder, **soha nem** megy `ANTHROPIC_API_KEY`‑ként a backendbe.
+
+→ Ezért működik **előfizetéssel, túlhasználat nélkül**: ha nincs
+`ANTHROPIC_API_KEY` a környezetben és a felhasználó `claude login`‑nal (Pro/Max
+OAuth) be van jelentkezve, a bridge a tárolt OAuth‑credentialt használja. **Ezen
+nem kell változtatni.** (A korábbi „át kell állni API kulcsra" aggály téves volt;
+az `auth_type="api_key"` javaslat lent KIZÁRÓLAG a Hermes→proxy belső réteg.)
+
+**Csak hardening (nem hibajavítás):**
+- **`doctor` logika megfordítása.** Most az `ANTHROPIC_API_KEY set`‑et tekinti
+  „auth OK"‑nak (zöld) — ez előfizetéses esetben **félrevezető és veszélyes**: egy
+  véletlenül beállított kulcs (`.bashrc`/`.env`/devcontainer) **csendben felülírja
+  az előfizetést és API‑áron számláz**. A zöld jel a `claude login` OAuth megléte
+  legyen; az API‑kulcs jelenléte **figyelmeztetés**.
+- **Opcionális env‑higiénia:** egy `HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION=1` flag
+  mögött a bridge a backend‑subprocess env‑jéből vegye ki az `ANTHROPIC_API_KEY`‑t,
+  hogy akkor is az előfizetés menjen, ha a környezetben ott van egy kulcs.
+- **`--bare` továbbra is kerülendő** (bare módban a `CLAUDE_CODE_OAUTH_TOKEN` nem
+  olvasódik be) — a jelenlegi kód nem is használ `--bare`‑t, ez csak megőrzendő.
+- **Headless/CI** esetre dokumentálható a `claude setup-token` →
+  `CLAUDE_CODE_OAUTH_TOKEN` út, ami szintén öröklődik a subprocessbe.
 
 ### P0 — Strukturális illeszkedés (enélkül nem „natív" a beépülés)
 
