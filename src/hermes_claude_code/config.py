@@ -41,6 +41,10 @@ MODEL_ID_ALIASES = {
 }
 FALLBACK_MODELS = DEFAULT_MODELS
 MODEL_OWNER = "anthropic-claude-code"
+# Cheap/fast model Hermes should use for auxiliary work (vision summaries,
+# context compression, memory flushes) so those never burn the main model.
+# A catalog display name so the proxy maps it via MODEL_ID_ALIASES.
+DEFAULT_AUX_MODEL = "Haiku 4.5"
 
 
 def hermes_home() -> Path:
@@ -71,6 +75,13 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass
 class Config:
     """Resolved runtime configuration for proxy + bridge."""
@@ -83,6 +94,10 @@ class Config:
     cwd: str | None = None
     request_timeout: float = 600.0
     startup_timeout: float = 30.0
+    # When True, the bridge strips ANTHROPIC_API_KEY from the backend
+    # subprocess environment so Claude Code always uses the `claude login`
+    # subscription (OAuth) instead of silently billing at API rates.
+    force_subscription: bool = False
     fallback_models: tuple = FALLBACK_MODELS
     models: tuple = DEFAULT_MODELS
 
@@ -121,4 +136,5 @@ def get_config() -> Config:
         cwd=os.environ.get("HERMES_CLAUDE_CODE_CWD") or None,
         request_timeout=_env_float("HERMES_CLAUDE_CODE_TIMEOUT", 600.0),
         startup_timeout=_env_float("HERMES_CLAUDE_CODE_STARTUP_TIMEOUT", 30.0),
+        force_subscription=_env_bool("HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION", False),
     )

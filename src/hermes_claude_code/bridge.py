@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -569,6 +570,21 @@ class ClaudeBridge:
     def __init__(self, config: Config | None = None) -> None:
         self.config = config or get_config()
 
+    # -- auth env hygiene -------------------------------------------------- #
+    def _backend_env(self) -> dict[str, str] | None:
+        """Environment for the Claude Code backend, or None to inherit as-is.
+
+        With ``force_subscription`` on, ANTHROPIC_API_KEY is removed so Claude
+        Code falls back to the ``claude login`` subscription (OAuth) instead of
+        silently billing at API rates. Off by default → returns None so the
+        backend inherits the process environment unchanged (current behaviour).
+        """
+        if not self.config.force_subscription:
+            return None
+        env = dict(os.environ)
+        env.pop("ANTHROPIC_API_KEY", None)
+        return env
+
     # -- public API -------------------------------------------------------- #
     async def complete(self, conv: Conversation) -> BridgeResult:
         if sdk_available():
@@ -623,6 +639,9 @@ class ClaudeBridge:
         from claude_agent_sdk import ClaudeAgentOptions
 
         kwargs: dict[str, Any] = {"model": conv.backend_model}
+        backend_env = self._backend_env()
+        if backend_env is not None:
+            kwargs["env"] = backend_env
         if conv.system_prompt:
             kwargs["system_prompt"] = conv.system_prompt
         if conv.cwd:
@@ -812,6 +831,7 @@ class ClaudeBridge:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=conv.cwd or None,
+            env=self._backend_env(),
         )
         out, err = await proc.communicate(conv.prompt.encode("utf-8"))
         if proc.returncode != 0:

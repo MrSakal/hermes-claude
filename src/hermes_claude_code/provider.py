@@ -15,6 +15,7 @@ import httpx
 
 from .config import (
     BASE_URL_ENV_VAR,
+    DEFAULT_AUX_MODEL,
     DESCRIPTION,
     DISPLAY_NAME,
     FALLBACK_MODELS,
@@ -47,11 +48,16 @@ except Exception:  # pragma: no cover - depends on runtime
         auth_type: str = "api_key"
         supports_health_check: bool = True
         supports_vision: bool = False
+        supports_vision_tool_messages: bool = True
         fallback_models: tuple = ()
         hostname: str = ""
         default_headers: dict = field(default_factory=dict)
+        fixed_temperature: Any = None
         default_max_tokens: int | None = None
         default_aux_model: str = ""
+
+        def get_hostname(self) -> str:
+            return self.hostname
 
         def fetch_models(self, *, api_key=None, base_url=None, timeout=8.0):
             return None
@@ -69,6 +75,16 @@ class ClaudeCodeProviderProfile(_BaseProfile):
         base_url: str | None = None,
         timeout: float = 8.0,
     ) -> list[str] | None:
+        # The model list lives on the local proxy. Hermes calls fetch_models()
+        # to populate the picker, which makes it a natural lazy autostart point
+        # so the provider works even when no session hook started the proxy.
+        try:
+            from .proxy import ensure_proxy_running
+
+            ensure_proxy_running()
+        except Exception:
+            pass  # best-effort; fall through to the curated list on failure
+
         url = (base_url or self.base_url).rstrip("/") + "/models"
         try:
             resp = httpx.get(url, timeout=timeout)
@@ -101,6 +117,7 @@ def build_profile(config: Config | None = None) -> ClaudeCodeProviderProfile:
         supports_health_check=True,
         supports_vision=True,
         fallback_models=FALLBACK_MODELS,
+        default_aux_model=DEFAULT_AUX_MODEL,
     )
 
 

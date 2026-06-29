@@ -1,0 +1,5 @@
+name: hermes-claude-code
+kind: model-provider
+version: 0.1.0
+description: "Claude Code as a Hermes model provider via a local OpenAI-compatible bridge."
+author: Nous Research

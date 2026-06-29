@@ -82,9 +82,25 @@ def _cli_handler(args) -> int:
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
-def register(ctx) -> None:
-    """Hermes plugin entry point."""
+def register(ctx=None) -> None:
+    """Hermes plugin entry point.
+
+    Callable two ways:
+
+      * **Directory / pip entry-point discovery** — invoked with no arguments
+        (``ctx is None``). The provider profile is registered; the optional
+        session-hook / CLI / slash-command wiring is simply skipped because it
+        needs a plugin context.
+      * **General-plugin loader** — invoked with a ``ctx`` that exposes
+        ``register_hook`` / ``register_cli_command`` / ``register_command``.
+
+    Provider registration always runs first so the model picker is populated in
+    either path. ``ctx`` being absent (or lacking a method) is not an error.
+    """
     register_provider_profile()
+
+    if ctx is None:
+        return
 
     def _on_session_start(**_kwargs: Any) -> None:
         try:
