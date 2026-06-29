@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import signal
 import time
@@ -25,8 +26,56 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import __version__
-from .bridge import ClaudeBridge, prepare_conversation, sdk_available
+from .bridge import ClaudeBridge, preemptive_host_tool_call, prepare_conversation, sdk_available
 from .config import Config, MODEL_OWNER, get_config
+
+
+logger = logging.getLogger("hermes_claude_code.proxy")
+
+
+def _setup_logging(cfg: Config) -> None:
+    """Write proxy diagnostics to ~/.hermes/logs/hermes-claude-code.log."""
+    if logger.handlers:
+        return
+    cfg.log_file.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(cfg.log_file, encoding="utf-8")
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+
+def _tool_names(payload: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    for tool in payload.get("tools") or []:
+        if not isinstance(tool, dict):
+            continue
+        fn = tool.get("function") if tool.get("type") == "function" else None
+        if isinstance(fn, dict) and fn.get("name"):
+            names.append(str(fn["name"]))
+    return names
+
+
+def _log_host_tool_calls(origin: str, tool_calls: list[dict[str, Any]]) -> None:
+    """Log every Hermes-bound tool call the plugin emits.
+
+    The plugin cannot write TUI/Desktop UI events directly without patching
+    Hermes core.  The native path is to emit OpenAI-compatible ``tool_calls``;
+    Hermes then executes and renders them.  This log gives a plugin-owned audit
+    trail in ``~/.hermes/logs/hermes-claude-code.log`` for the same calls.
+    """
+    for index, call in enumerate(tool_calls or []):
+        fn = call.get("function", {}) if isinstance(call, dict) else {}
+        logger.info(
+            "host tool_call origin=%s index=%d id=%s name=%s arguments=%s",
+            origin,
+            index,
+            call.get("id") if isinstance(call, dict) else "",
+            fn.get("name"),
+            fn.get("arguments"),
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -47,9 +96,16 @@ def models_payload(config: Config) -> dict[str, Any]:
 
 
 def completion_response(
-    *, model: str, text: str, finish_reason: str, tool_calls: list[dict[str, Any]]
+    *,
+    model: str,
+    text: str,
+    finish_reason: str,
+    tool_calls: list[dict[str, Any]],
+    reasoning_content: str = "",
 ) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "assistant", "content": text or None}
+    if reasoning_content:
+        message["reasoning_content"] = reasoning_content
     if tool_calls:
         message["tool_calls"] = tool_calls
     return {
@@ -92,6 +148,7 @@ def error_payload(message: str, type_: str = "invalid_request_error", code: Any 
 # --------------------------------------------------------------------------- #
 def create_app(bridge: Any | None = None, config: Config | None = None):
     cfg = config or get_config()
+    _setup_logging(cfg)
     bridge = bridge or ClaudeBridge(cfg)
 
     app = FastAPI(title="Hermes Claude Code Proxy", version=__version__)
@@ -124,6 +181,43 @@ def create_app(bridge: Any | None = None, config: Config | None = None):
 
         conv = prepare_conversation(payload, cfg)
         stream = bool(payload.get("stream"))
+        names = _tool_names(payload)
+        logger.info(
+            "chat.completions request model=%s stream=%s messages=%d tools=%d tool_names=%s mode=%s",
+            conv.model,
+            stream,
+            len(payload.get("messages") or []),
+            len(names),
+            ",".join(names[:30]),
+            conv.mode,
+        )
+        preemptive = preemptive_host_tool_call(conv)
+        if preemptive is not None:
+            logger.info(
+                "preemptive host tool_call finish=%s tool_calls=%d",
+                preemptive.finish_reason,
+                len(preemptive.tool_calls),
+            )
+            _log_host_tool_calls("preemptive", preemptive.tool_calls)
+            if stream:
+                cmpl_id = f"chatcmpl-{uuid.uuid4().hex}"
+
+                async def preemptive_stream():
+                    yield _chunk(conv.model, cmpl_id, {"role": "assistant"})
+                    yield _chunk(conv.model, cmpl_id, {"tool_calls": preemptive.tool_calls})
+                    yield _chunk(conv.model, cmpl_id, {}, finish=preemptive.finish_reason)
+                    yield "data: [DONE]\n\n"
+
+                return StreamingResponse(
+                    preemptive_stream(), media_type="text/event-stream"
+                )
+            return completion_response(
+                model=conv.model,
+                text=preemptive.text,
+                finish_reason=preemptive.finish_reason,
+                tool_calls=preemptive.tool_calls,
+                reasoning_content=preemptive.reasoning_content,
+            )
 
         if stream:
             cmpl_id = f"chatcmpl-{uuid.uuid4().hex}"
@@ -135,17 +229,30 @@ def create_app(bridge: Any | None = None, config: Config | None = None):
                 try:
                     async for evt in bridge.stream(conv):
                         if evt.get("type") == "text" and evt.get("text"):
+                            logger.info("stream text_delta chars=%d", len(evt["text"]))
                             yield _chunk(
                                 conv.model, cmpl_id, {"content": evt["text"]}
+                            )
+                        elif evt.get("type") == "reasoning" and evt.get("text"):
+                            logger.info("stream reasoning_delta chars=%d", len(evt["text"]))
+                            yield _chunk(
+                                conv.model, cmpl_id, {"reasoning_content": evt["text"]}
                             )
                         elif evt.get("type") == "done":
                             finish = evt.get("finish_reason", "stop")
                             tool_calls = evt.get("tool_calls") or []
+                            logger.info(
+                                "stream done finish=%s tool_calls=%d",
+                                finish,
+                                len(tool_calls),
+                            )
                 except Exception as exc:  # pragma: no cover - live failure path
+                    logger.exception("stream failed: %s", exc)
                     yield f"data: {json.dumps(error_payload(str(exc), 'server_error'))}\n\n"
                     yield "data: [DONE]\n\n"
                     return
                 if tool_calls:
+                    _log_host_tool_calls("stream", tool_calls)
                     yield _chunk(conv.model, cmpl_id, {"tool_calls": tool_calls})
                 yield _chunk(conv.model, cmpl_id, {}, finish=finish)
                 yield "data: [DONE]\n\n"
@@ -157,15 +264,26 @@ def create_app(bridge: Any | None = None, config: Config | None = None):
         try:
             result = await bridge.complete(conv)
         except Exception as exc:
+            logger.exception("nonstream failed: %s", exc)
             return JSONResponse(
                 status_code=502,
                 content=error_payload(str(exc), "server_error"),
             )
+        logger.info(
+            "nonstream done finish=%s tool_calls=%d reasoning_chars=%d text_chars=%d",
+            result.finish_reason,
+            len(result.tool_calls),
+            len(result.reasoning_content or ""),
+            len(result.text or ""),
+        )
+        if result.tool_calls:
+            _log_host_tool_calls("nonstream", result.tool_calls)
         return completion_response(
             model=conv.model,
             text=result.text,
             finish_reason=result.finish_reason,
             tool_calls=result.tool_calls,
+            reasoning_content=result.reasoning_content,
         )
 
     return app
@@ -221,6 +339,8 @@ def ensure_proxy_running(config: Config | None = None) -> dict[str, Any]:
     except FileExistsError:
         acquired = False
 
+    cfg.log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = cfg.log_file.open("ab", buffering=0)
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -231,8 +351,8 @@ def ensure_proxy_running(config: Config | None = None) -> dict[str, Any]:
             "--port",
             str(cfg.port),
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_handle,
+        stderr=log_handle,
         start_new_session=True,
     )
     cfg.pid_file.write_text(str(proc.pid))

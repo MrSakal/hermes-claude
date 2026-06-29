@@ -99,6 +99,7 @@ def build_profile(config: Config | None = None) -> ClaudeCodeProviderProfile:
         auth_type="external_process",
         base_url=cfg.base_url,
         supports_health_check=True,
+        supports_vision=True,
         fallback_models=FALLBACK_MODELS,
     )
 
