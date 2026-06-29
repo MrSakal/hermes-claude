@@ -20,21 +20,23 @@ that runs `hermes`, and the **discovery directory** exists under `$HERMES_HOME`.
 ```bash
 # 1. Install the package INTO THE SAME ENV AS hermes (from this checkout)
 pip install -e '.[sdk]'                 # core + claude-agent-sdk backend
-#   (a plain `pip install '.[sdk]'` works too; -e keeps it editable)
 
-# 2. Drop the provider into Hermes' user plugin directory (the discovery path)
-mkdir -p "${HERMES_HOME:-$HOME/.hermes}/plugins/model-providers"
-cp -r plugins/model-providers/hermes-claude-code \
-      "${HERMES_HOME:-$HOME/.hermes}/plugins/model-providers/"
+# 2. Write the discovery dir into $HERMES_HOME (one command, runs in the same env)
+hermes-claude-code install
 
 # 3. Claude Code backend + subscription login (no API key)
 claude login                            # Pro/Max OAuth
 #   make sure ANTHROPIC_API_KEY is NOT exported (it would bill at API rates)
 
 # 4. Verify — "Claude Code" should now appear in the picker
-hermes claude-code doctor
+hermes-claude-code doctor
 hermes model
 ```
+
+`hermes-claude-code install` is equivalent to copying
+`plugins/model-providers/hermes-claude-code/` into
+`$HERMES_HOME/plugins/model-providers/` by hand; use `hermes-claude-code
+uninstall` to remove it.
 
 If `hermes model` still doesn't list **Claude Code**, confirm discovery from the
 same interpreter Hermes uses:
