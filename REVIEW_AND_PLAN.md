@@ -183,9 +183,44 @@ Nagyrészt **igen**, de van hézag:
 
 ## 6. Tervezet — mit változtatni / javítani / erősíteni / optimalizálni
 
+### P0 — Auth és számlázás: ELŐFIZETÉS (OAuth), NEM API kulcs  ⚠️ KIEMELT
+
+A felhasználó **a Claude előfizetését** (Pro/Max, `claude login` OAuth) akarja
+használni, **nem** API kulcsot, és a token‑alapú „extra usage" (túlhasználat)
+**bekapcsolása nélkül**. Két különböző auth‑réteget kell szétválasztani:
+
+- **Hermes → lokális proxy**: a `ProviderProfile` „api_key"‑e csak placeholder,
+  a localhost proxy eldobja. Semmi köze a Claude számlázásához. (Lásd lent #1.)
+- **Bridge → Anthropic**: itt számít az előfizetés. Tények:
+  - **`ANTHROPIC_API_KEY` mindig felülírja az előfizetést** és API‑áron számláz.
+    → A bridge subprocess környezetéből **ki kell venni** (strip), és a placeholdert
+    **soha** nem szabad `ANTHROPIC_API_KEY` néven a subprocessbe szivárogtatni.
+  - Headless előfizetéses út: **`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`**
+    env‑var (Pro/Max/Team/Enterprise). **`--bare` módban NEM olvasódik be** → a
+    bridge ne használjon `--bare`‑t.
+  - **Kockázat (őszintén):** az Anthropic a harmadik fél eszközöket (Hermes az
+    SDK‑n át) Pro/Max‑on token‑alapon, extra‑usage‑ként számlázhatja; az Agent SDK
+    dokumentáltan API‑kulcsot vár (claude‑agent‑sdk‑python #559), és van nyitott
+    bug, hogy `claude -p` OAuth‑tal mégis API‑usage‑ként számláz (claude‑code
+    #43333). Hogy extra‑usage **nélkül** működik‑e, az Anthropic oldali politika,
+    nem kódkérdés — egy próbahívással + `claude /status`‑szal kell ellenőrizni.
+
+**Döntések (alap):**
+- **Backend default: `claude` CLI a `claude login` OAuth‑fiókkal** (legközelebb a
+  natív előfizetéses használathoz). Headless esetre `CLAUDE_CODE_OAUTH_TOKEN`
+  támogatás. Az Agent SDK csak opcionális (env‑flaggel), mert API‑kulcsot vár /
+  extra‑usage‑et válthat ki.
+- **`ANTHROPIC_API_KEY` kezelése: strip + warn.** A proxy a bridge subprocess
+  env‑jéből kiveszi (`env.pop("ANTHROPIC_API_KEY")`), és a `doctor` figyelmeztet,
+  ha jelen van (mert csendben API‑áron számlázna).
+- **`doctor` átírása:** ne az `ANTHROPIC_API_KEY`‑t tekintse „auth OK"‑nak, hanem
+  a `claude` OAuth login meglétét (`claude auth status` / `/status`). Az API kulcs
+  jelenléte **figyelmeztetés**, nem zöld pipa.
+
 ### P0 — Strukturális illeszkedés (enélkül nem „natív" a beépülés)
 
-1. **`auth_type: external_process` → `api_key`** (placeholder kulccsal).
+1. **`auth_type: external_process` → `api_key`** (placeholder kulccsal — kizárólag
+   a Hermes→proxy réteghez; lásd a fenti auth‑szekciót).
    - `env_vars=("HERMES_CLAUDE_CODE_API_KEY", "HERMES_CLAUDE_CODE_BASE_URL")`,
      `base_url = http://127.0.0.1:<port>/v1`.
    - A `__init__.py`/telepítő gondoskodik róla, hogy a `HERMES_CLAUDE_CODE_API_KEY`
@@ -294,10 +329,14 @@ ProviderProfile(
 
 ## 7. Prioritizált akciólista (összegzés)
 
-- **P0 (illeszkedés):** `api_key` auth + placeholder kulcs → monkeypatch és kézi
-  registry‑injektálás törlése; `plugins/model-providers/<name>/__init__.py`
-  szerkezet; `plugin.yaml kind: model-provider`; entry point `…:register`
-  argumentum nélkül.
+- **P0 (auth/számlázás):** előfizetés (OAuth) használata, **nem** API kulcs;
+  `claude` CLI + `claude login` default backend (+ `CLAUDE_CODE_OAUTH_TOKEN`
+  headless); `ANTHROPIC_API_KEY` strip a bridge env‑ből + `doctor` figyelmeztetés;
+  `--bare` kerülése. (Extra‑usage nélküli működés Anthropic‑oldali politika — tesztelni.)
+- **P0 (illeszkedés):** `api_key` auth + placeholder kulcs (csak Hermes→proxy) →
+  monkeypatch és kézi registry‑injektálás törlése;
+  `plugins/model-providers/<name>/__init__.py` szerkezet;
+  `plugin.yaml kind: model-provider`; entry point `…:register` argumentum nélkül.
 - **P1 (helyes működés):** provider‑regisztráció és general‑plugin extrák
   szétválasztása; proxy lazy autostart; `default_aux_model`; id‑alapú
   modellkatalógus.
