@@ -78,6 +78,17 @@ def strip_mcp_prefix(name: str) -> str:
     return name
 
 
+def is_hermes_mcp_tool_name(name: str) -> bool:
+    """Return True only for tool-use blocks from our Hermes MCP server.
+
+    Claude Code may emit SDK-internal helper tool uses such as ``ToolSearch``
+    while discovering MCP tools. Those are not Hermes tools and must never be
+    forwarded as OpenAI ``tool_calls`` to Hermes, or the Hermes dispatcher will
+    see an unknown tool before the real requested tool.
+    """
+    return name.startswith(f"mcp__{MCP_SERVER_NAME}__")
+
+
 def build_sdk_mcp_server(
     tools: list[dict[str, Any]] | None,
 ) -> tuple[Any, list[str], list[dict[str, Any]]]:
@@ -110,8 +121,8 @@ def build_sdk_mcp_server(
                     {
                         "type": "text",
                         "text": (
-                            f"[hermes] tool '{tool_name}' delegated to host; "
-                            "awaiting result"
+                            f"[hermes] tool '{tool_name}' delegated to host and recorded. "
+                            "Stop now; the host will execute it and return the real result in the next request."
                         ),
                     }
                 ]

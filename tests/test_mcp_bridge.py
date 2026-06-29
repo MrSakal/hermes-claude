@@ -64,6 +64,12 @@ def test_qualified_name_roundtrip():
     assert mcp_server.strip_mcp_prefix("plain") == "plain"
 
 
+def test_internal_sdk_tools_are_not_hermes_mcp_tools():
+    assert mcp_server.is_hermes_mcp_tool_name("mcp__hermes-tools__get_weather")
+    assert not mcp_server.is_hermes_mcp_tool_name("ToolSearch")
+    assert not mcp_server.is_hermes_mcp_tool_name("Read")
+
+
 def test_build_sdk_mcp_server_exposes_same_tools():
     # claude-agent-sdk is installed in the test env (sdk extra).
     server, allowed, captured = mcp_server.build_sdk_mcp_server(TOOLS)

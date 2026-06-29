@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from hermes_claude_code.bridge import BridgeResult
+from hermes_claude_code import proxy
 
 from .conftest import FakeBridge
 
@@ -55,6 +56,28 @@ def test_nonstream_tool_calls(make_client):
     choice = body["choices"][0]
     assert choice["finish_reason"] == "tool_calls"
     assert choice["message"]["tool_calls"][0]["function"]["name"] == "lookup"
+
+
+def test_nonstream_tool_calls_logs_host_tool_call(make_client, monkeypatch):
+    seen = []
+    monkeypatch.setattr(proxy, "_log_host_tool_calls", lambda origin, calls: seen.append((origin, calls)))
+    tool_call = {
+        "id": "call_0_lookup",
+        "type": "function",
+        "function": {"name": "lookup", "arguments": '{"q": "x"}'},
+    }
+    bridge = FakeBridge(
+        BridgeResult(text="", tool_calls=[tool_call], finish_reason="tool_calls")
+    )
+    client = make_client(bridge=bridge)
+
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"model": "sonnet", "messages": [{"role": "user", "content": "look it up"}]},
+    )
+
+    assert resp.status_code == 200
+    assert seen == [("nonstream", [tool_call])]
 
 
 def test_missing_messages_is_400(make_client):

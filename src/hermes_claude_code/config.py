@@ -106,6 +106,10 @@ class Config:
     def pid_file(self) -> Path:
         return self.run_dir / "hermes-claude-code.pid"
 
+    @property
+    def log_file(self) -> Path:
+        return hermes_home() / "logs" / "hermes-claude-code.log"
+
 
 def get_config() -> Config:
     """Build a Config from the current environment."""
