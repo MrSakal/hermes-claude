@@ -353,3 +353,44 @@ ProviderProfile(
 > A nettó hatás: **kevesebb kód** (a két legtörékenyebb rész, a monkeypatch és a
 > kézi registry‑hack eltűnik), **dokumentált beillesztési út**, és a kívánt
 > „telepítem és ott van a modellválasztóban, natívként viselkedik" élmény.
+
+---
+
+## 8. Implementációs státusz (ebben a branchben elvégezve)
+
+A változtatások **konzervatívak és additívak** — a környezetben nincs valódi
+Hermes, ezért a már működő utat nem bontottam meg; minden lépés a 93 zöld teszt
+mellett készült.
+
+**Kész (ebben a branchben):**
+- ✅ **Könyvtár‑alapú felderítés**: új
+  `plugins/model-providers/hermes-claude-code/{__init__.py, plugin.yaml,
+  README.md}`; az `__init__.py` import‑időben hívja a `register()`‑et (a
+  dokumentált discovery‑út). `pip`‑hiányra `src/` fallback a `sys.path`‑on.
+- ✅ **`register(ctx=None)`**: ctx nélkül is hívható (entry‑point/könyvtár‑út),
+  nem száll el; a ctx‑függő extrák (hook/CLI/slash) csak ctx esetén futnak.
+- ✅ **Entry point javítva**: `hermes_claude_code.plugin:register` (függvényre).
+- ✅ **`plugin.yaml kind: standalone → model-provider`** (root + plugin‑könyvtár).
+- ✅ **`default_aux_model="Haiku 4.5"`** a profilban (olcsó aux út).
+- ✅ **Lazy proxy autostart** a `fetch_models()`‑ben (nem csak session hookon múlik).
+- ✅ **Profil‑shim szinkron** (`supports_vision_tool_messages`,
+  `fixed_temperature`, `get_hostname`).
+- ✅ **Doctor auth megfordítva**: a `claude login` OAuth a zöld jel; az
+  `ANTHROPIC_API_KEY` jelenléte **figyelmeztetés** (felülírja az előfizetést,
+  API‑áron számláz). + 2 új teszt.
+- ✅ **`HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION=1`**: a bridge a backend
+  subprocess env‑jéből kiveszi az `ANTHROPIC_API_KEY`‑t (CLI + SDK `env`),
+  PATH stb. megőrizve. Alapból OFF → a jelenlegi viselkedés változatlan.
+
+**Szándékosan elhalasztva (valódi Hermes ellen validálandó, mert a jelenlegi
+működő utat érintené):**
+- ⏳ `auth_type: external_process → api_key` + a `runtime.py` monkeypatch és a
+  `provider.py` kézi `PROVIDER_REGISTRY` injektálás **eltávolítása**. Ez a
+  legnagyobb egyszerűsítés, de mivel nálad a jelenlegi `external_process` út
+  **működik**, és itt nincs Hermes a teszteléshez, nem vágtam ki vakon. Valódi
+  Hermesen: regisztrálni `api_key`‑ként placeholder env‑kulccsal, ellenőrizni,
+  hogy az `auth.py` auto‑extend + `resolve_runtime_provider` felveszi‑e, és csak
+  utána törölni a kerülőutakat.
+- ⏳ Modellkatalógus id‑alapúra (most display‑nevek + `MODEL_ID_ALIASES`, ami
+  **működik**) — együtt érdemes a fentivel validálni.
+- ⏳ `tool_choice` érvényesítés és a strict‑heurisztikák visszavágása (P2).

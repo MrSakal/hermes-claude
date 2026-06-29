@@ -18,7 +18,7 @@ sdk = [
 ]
 
 [project.entry-points."hermes_agent.plugins"]
-hermes-claude-code = "hermes_claude_code.plugin"
+hermes-claude-code = "hermes_claude_code.plugin:register"
 
 [project.scripts]
 hermes-claude-code-proxy = "hermes_claude_code.proxy:main"

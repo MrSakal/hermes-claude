@@ -21,7 +21,15 @@ hermes model
 ```
 
 `doctor` reports exactly what's missing (SDK, `claude` CLI, auth, or proxy).
-Authenticate Claude Code with either `ANTHROPIC_API_KEY` or `claude` login.
+
+**Auth — use your Claude subscription, no API key.** The bridge runs Claude Code
+with whatever credentials `claude` is logged in with, so a `claude login`
+(Pro/Max/Team/Enterprise OAuth) just works — no API key, no extra-usage billing.
+⚠️ If `ANTHROPIC_API_KEY` is set in the environment it **overrides** the
+subscription and bills at API rates; `doctor` warns when it sees one. To force
+subscription use even when a key is present, set
+`HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION=1` (the bridge then strips the key from
+the Claude Code subprocess).
 
 ## Configure Hermes to use it
 
@@ -67,6 +75,7 @@ The proxy is also started automatically on session start.
 | `HERMES_CLAUDE_CODE_MODE` | `strict` | `strict` surfaces tool calls back to Hermes; `agentic` lets Claude Code run tools internally |
 | `HERMES_CLAUDE_CODE_CWD` | _(unset)_ | Working directory for Claude Code |
 | `HERMES_CLAUDE_CODE_TIMEOUT` | `600` | Per-request timeout (seconds) |
+| `HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION` | `0` | When `1`, strip `ANTHROPIC_API_KEY` from the backend so Claude Code uses the `claude login` subscription |
 
 ## Tool calling (strict mode)
 
