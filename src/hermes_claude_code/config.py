@@ -12,13 +12,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 PROVIDER_NAME = "hermes-claude-code"
-PROVIDER_ALIASES = ("claude-code", "hermes_claude_code")
+# NB: do NOT use "claude-code" here — it is a built-in alias of Hermes' own
+# ``anthropic`` provider (the raw Anthropic API/OAuth path) and would collide.
+PROVIDER_ALIASES = ("claude-code-agent", "hermes_claude_code")
 DISPLAY_NAME = "Claude Code"
 DESCRIPTION = "Claude Code via local OpenAI-compatible Hermes bridge"
+# Env var the Hermes api-key auth layer reads for our placeholder credential.
+# Listed in the profile's ``env_vars`` so Hermes' auto-extend registers us.
+API_KEY_ENV_VAR = "HERMES_CLAUDE_CODE_API_KEY"
 # Env var the Hermes auth layer can use to override the proxy base URL.
 BASE_URL_ENV_VAR = "HERMES_CLAUDE_CODE_BASE_URL"
 # Non-empty placeholder key. The proxy is a local trusted endpoint and needs no
-# real credential, but the OpenAI SDK rejects an empty api_key string.
+# real credential, but the api-key resolver (and OpenAI SDK) reject an empty
+# api_key string, so we publish this constant into the env via ``register()``.
 LOCAL_API_KEY = "hermes-claude-code-local"
 
 DEFAULT_HOST = "127.0.0.1"

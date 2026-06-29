@@ -382,18 +382,31 @@ mellett készült.
   subprocess env‑jéből kiveszi az `ANTHROPIC_API_KEY`‑t (CLI + SDK `env`),
   PATH stb. megőrizve. Alapból OFF → a jelenlegi viselkedés változatlan.
 
-**Szándékosan elhalasztva (valódi Hermes ellen validálandó, mert a jelenlegi
-működő utat érintené):**
-- ⏳ `auth_type: external_process → api_key` + a `runtime.py` monkeypatch és a
-  `provider.py` kézi `PROVIDER_REGISTRY` injektálás **eltávolítása**. Ez a
-  legnagyobb egyszerűsítés, de mivel nálad a jelenlegi `external_process` út
-  **működik**, és itt nincs Hermes a teszteléshez, nem vágtam ki vakon. Valódi
-  Hermesen: regisztrálni `api_key`‑ként placeholder env‑kulccsal, ellenőrizni,
-  hogy az `auth.py` auto‑extend + `resolve_runtime_provider` felveszi‑e, és csak
-  utána törölni a kerülőutakat.
+**Elvégezve (valódi, helyben telepített Hermes ellen validálva — `providers` és
+`hermes_cli` importálható ebben a környezetben):**
+- ✅ **`auth_type: external_process → api_key`** + a `runtime.py` monkeypatch és
+  a `provider.py` kézi `PROVIDER_REGISTRY` injektálás (`register_auth_provider`)
+  **eltávolítva**. A profil most `auth_type="api_key"`,
+  `env_vars=("HERMES_CLAUDE_CODE_API_KEY","HERMES_CLAUDE_CODE_BASE_URL")`,
+  `base_url=localhost`; a `register()` `os.environ.setdefault`-tel beállít egy
+  placeholder kulcsot + base URL-t. Valódi Hermesen ellenőrizve: a provider
+  felfedeződik, az `auth.py` auto‑extend felveszi a `PROVIDER_REGISTRY`-be
+  (`api_key`, `inference_base_url=localhost`), és a `resolve_runtime_provider`
+  **nem‑üres** kulccsal + localhost base URL-lel + `chat_completions`-szel
+  oldja fel. A `runtime.py` és `tests/test_runtime.py` törölve.
+- ✅ **Alias‑ütközés:** a `claude-code` alias (a beépített `anthropic`-é)
+  lecserélve `claude-code-agent`-re. Valódi Hermesen ellenőrizve, hogy az
+  `anthropic` továbbra is birtokolja a `claude-code`/`claude` aliasokat.
+- ✅ **`tool_choice` érvényesítés** a bridge-ben: `none` (nincs tool),
+  `required`/`{"type":"any"}` (kötelező tool, rendszerpromptból terelve),
+  konkrét függvény (csak az az egy tool exponálva + a többi hívás kiszűrve).
+  Tesztelve (`tests/test_tool_choice.py`).
+
+**Továbbra is elhalasztva (alacsony prioritás):**
 - ⏳ Modellkatalógus id‑alapúra (most display‑nevek + `MODEL_ID_ALIASES`, ami
-  **működik**) — együtt érdemes a fentivel validálni.
-- ⏳ `tool_choice` érvényesítés és a strict‑heurisztikák visszavágása (P2).
+  **működik**).
+- ⏳ A strict‑mód magyar regex heurisztikáinak visszavágása / env‑flag mögé
+  tétele (P2).
 
 ## 9. Verifikálva a valódi forrás ellen (NousResearch/hermes-agent)
 

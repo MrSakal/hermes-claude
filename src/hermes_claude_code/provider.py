@@ -9,16 +9,19 @@ remains importable and testable on its own.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import httpx
 
 from .config import (
+    API_KEY_ENV_VAR,
     BASE_URL_ENV_VAR,
     DEFAULT_AUX_MODEL,
     DESCRIPTION,
     DISPLAY_NAME,
     FALLBACK_MODELS,
+    LOCAL_API_KEY,
     PROVIDER_ALIASES,
     PROVIDER_NAME,
     Config,
@@ -112,7 +115,15 @@ def build_profile(config: Config | None = None) -> ClaudeCodeProviderProfile:
         api_mode="chat_completions",
         display_name=DISPLAY_NAME,
         description=DESCRIPTION,
-        auth_type="external_process",
+        # ``api_key`` (not ``external_process``): Hermes' auth.py auto-extend
+        # registers any api_key profile with non-empty ``env_vars`` into
+        # PROVIDER_REGISTRY (inference_base_url=base_url, api_key_env_vars and
+        # base_url_env_var derived from env_vars) with no core edits. The
+        # _BASE_URL var is split out as the base-url override; the other becomes
+        # the api-key var. The "key" is a local placeholder — the proxy ignores
+        # it; it never reaches Anthropic and has nothing to do with billing.
+        auth_type="api_key",
+        env_vars=(API_KEY_ENV_VAR, BASE_URL_ENV_VAR),
         base_url=cfg.base_url,
         supports_health_check=True,
         supports_vision=True,
@@ -121,50 +132,18 @@ def build_profile(config: Config | None = None) -> ClaudeCodeProviderProfile:
     )
 
 
-def register_auth_provider(
-    config: Config | None = None,
-    *,
-    registry: dict | None = None,
-    provider_config_cls: Any | None = None,
-) -> Any | None:
-    """Register a ``ProviderConfig`` into ``hermes_cli.auth.PROVIDER_REGISTRY``.
+def register(config: Config | None = None) -> ClaudeCodeProviderProfile:
+    """Build and register the profile with Hermes (no-op if unavailable).
 
-    The Hermes runtime resolves chat providers through that registry. Its
-    auto-extend pass only imports ``auth_type == "api_key"`` provider profiles,
-    so an ``external_process`` provider like ours is otherwise invisible and
-    Hermes reports ``Unknown provider 'hermes-claude-code'``. This adds the
-    entry explicitly (best-effort; a no-op outside the Hermes runtime).
-
-    ``registry`` / ``provider_config_cls`` are injectable for testing.
+    Publishing a non-empty placeholder key (and the proxy base URL) into the
+    environment is what lets Hermes' generic api-key resolver wire us up: the
+    key resolver rejects an empty value, and the base-url resolver falls back to
+    the profile's ``base_url`` when the env var is unset (we set it anyway for
+    clarity). ``setdefault`` never overrides a value a user supplied.
     """
     cfg = config or get_config()
-    if registry is None or provider_config_cls is None:
-        try:
-            from hermes_cli import auth as _auth  # type: ignore
-
-            registry = _auth.PROVIDER_REGISTRY
-            provider_config_cls = _auth.ProviderConfig
-        except Exception:
-            return None
-
-    pconfig = provider_config_cls(
-        id=PROVIDER_NAME,
-        name=DISPLAY_NAME,
-        auth_type="external_process",
-        inference_base_url=cfg.base_url,
-        base_url_env_var=BASE_URL_ENV_VAR,
-    )
-    # We own this id — register it; only fill aliases that are still free so
-    # we never clobber a real built-in provider.
-    registry[PROVIDER_NAME] = pconfig
-    for alias in PROVIDER_ALIASES:
-        registry.setdefault(alias, pconfig)
-    return pconfig
-
-
-def register(config: Config | None = None) -> ClaudeCodeProviderProfile:
-    """Build and register the profile with Hermes (no-op if unavailable)."""
-    cfg = config or get_config()
+    os.environ.setdefault(API_KEY_ENV_VAR, LOCAL_API_KEY)
+    os.environ.setdefault(BASE_URL_ENV_VAR, cfg.base_url)
     profile = build_profile(cfg)
     try:
         from providers import register_provider  # type: ignore
@@ -172,8 +151,4 @@ def register(config: Config | None = None) -> ClaudeCodeProviderProfile:
         register_provider(profile)
     except Exception:
         pass
-    register_auth_provider(cfg)
-    from .runtime import install_runtime_patch
-
-    install_runtime_patch(cfg)
     return profile

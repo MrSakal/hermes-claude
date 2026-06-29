@@ -115,6 +115,11 @@ into OpenAI `tool_calls` so **Hermes stays the executor**. When Hermes replays
 the `tool` result message, the proxy continues the conversation. This keeps
 Hermes' tool semantics intact rather than letting Claude Code run tools opaquely.
 
+`tool_choice` is honoured: `none` exposes no tools (text-only answer),
+`required`/`{"type":"any"}` steers Claude to call a tool, and a specific
+`{"type":"function","function":{"name":...}}` exposes only that tool and drops
+any other call from the result.
+
 ## Development
 
 ```bash
@@ -127,7 +132,8 @@ uv run pytest -q
 
 ```
 Hermes model picker ──▶ ProviderProfile "hermes-claude-code"
-                               │  base_url = http://127.0.0.1:35345/v1
+                               │  auth_type = api_key  (localhost placeholder)
+                               │  base_url  = http://127.0.0.1:35345/v1
                                ▼
                        local OpenAI-compatible proxy (FastAPI)
                                │  /v1/chat/completions
@@ -135,3 +141,11 @@ Hermes model picker ──▶ ProviderProfile "hermes-claude-code"
                        ClaudeBridge ──▶ claude-agent-sdk.query(...)
                                └─fallback─▶ `claude -p --output-format json`
 ```
+
+The profile registers as a plain `api_key` provider whose `env_vars` are
+`HERMES_CLAUDE_CODE_API_KEY` / `HERMES_CLAUDE_CODE_BASE_URL`. Hermes' own
+`PROVIDER_REGISTRY` auto-extend (in `hermes_cli/auth.py`) then wires it up with
+no core edits — `inference_base_url` becomes the localhost proxy and the key is
+read from the env var. The key is a non-empty **placeholder** the proxy throws
+away; it is unrelated to Claude billing. Your Pro/Max subscription is used by
+the `claude login` credentials the bridge inherits.
