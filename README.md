@@ -12,13 +12,41 @@ returns OpenAI-shaped responses.
 
 ## Install
 
+Hermes discovers model providers by scanning `plugins/model-providers/<name>/`
+under `$HERMES_HOME` (default `~/.hermes`). Two things must be true: the
+`hermes_claude_code` **package** is importable in the *same* Python environment
+that runs `hermes`, and the **discovery directory** exists under `$HERMES_HOME`.
+
 ```bash
-pip install hermes-claude-code          # core
-pip install 'hermes-claude-code[sdk]'   # + claude-agent-sdk backend
-hermes plugins enable hermes-claude-code
+# 1. Install the package INTO THE SAME ENV AS hermes (from this checkout)
+pip install -e '.[sdk]'                 # core + claude-agent-sdk backend
+#   (a plain `pip install '.[sdk]'` works too; -e keeps it editable)
+
+# 2. Drop the provider into Hermes' user plugin directory (the discovery path)
+mkdir -p "${HERMES_HOME:-$HOME/.hermes}/plugins/model-providers"
+cp -r plugins/model-providers/hermes-claude-code \
+      "${HERMES_HOME:-$HOME/.hermes}/plugins/model-providers/"
+
+# 3. Claude Code backend + subscription login (no API key)
+claude login                            # Pro/Max OAuth
+#   make sure ANTHROPIC_API_KEY is NOT exported (it would bill at API rates)
+
+# 4. Verify — "Claude Code" should now appear in the picker
 hermes claude-code doctor
 hermes model
 ```
+
+If `hermes model` still doesn't list **Claude Code**, confirm discovery from the
+same interpreter Hermes uses:
+
+```bash
+python -c "from providers import list_providers; \
+print([p.name for p in list_providers()])"
+```
+
+`hermes-claude-code` must be in that list. If it isn't, the package isn't in
+Hermes' env (redo step 1 in the right venv) or the directory isn't under the
+active `$HERMES_HOME` (check `echo $HERMES_HOME`).
 
 `doctor` reports exactly what's missing (SDK, `claude` CLI, auth, or proxy).
 
