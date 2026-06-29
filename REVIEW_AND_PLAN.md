@@ -394,3 +394,39 @@ működő utat érintené):**
 - ⏳ Modellkatalógus id‑alapúra (most display‑nevek + `MODEL_ID_ALIASES`, ami
   **működik**) — együtt érdemes a fentivel validálni.
 - ⏳ `tool_choice` érvényesítés és a strict‑heurisztikák visszavágása (P2).
+
+## 9. Verifikálva a valódi forrás ellen (NousResearch/hermes-agent)
+
+A teljes fastruktúrát és a kulcsfájlokat a GitHub API‑n keresztül néztem át
+(a git‑klón a környezet relay‑én tiltott). Konkrét megerősítések:
+
+- **`auth.py:440` auto‑extend (idézet):** `if _pp.auth_type != "api_key" or not
+  _pp.env_vars: continue` — majd `PROVIDER_REGISTRY[name] = ProviderConfig(...,
+  api_key_env_vars=..., base_url_env_var=...)`. Vagyis **bármely `api_key` +
+  env‑var provider automatikusan bekerül a registrybe, fájlszerkesztés és
+  monkeypatch nélkül.** → A halasztott „api_key‑re váltás" mostantól
+  **forrással igazolt**: `auth_type="api_key"`,
+  `env_vars=("HERMES_CLAUDE_CODE_API_KEY","HERMES_CLAUDE_CODE_BASE_URL")`,
+  `base_url=localhost`, és a `register()` állítson be egy placeholder kulcsot
+  (`os.environ.setdefault`). Ekkor a `runtime.py` monkeypatch + a kézi registry
+  injektálás **eldobható**.
+- **`copilot-acp/__init__.py` (a mi `external_process` analógiánk):** docstring:
+  „external ACP subprocess — NOT the standard transport… handled separately in
+  run_agent.py". → Az `external_process` **core‑szinten van speciálisan
+  kezelve**; harmadik félnek nem generikus. Ezért **indokolt** a jelenlegi
+  monkeypatch a mostani (external_process) megközelítéshez — és ezért jobb az
+  api_key út.
+- **Beépített `anthropic` provider** már létezik:
+  `aliases=("claude","claude-oauth","claude-code")`, `api_mode="anthropic_messages"`,
+  `env_vars=(...,"CLAUDE_CODE_OAUTH_TOKEN")`, `default_aux_model=
+  "claude-haiku-4-5-20251001"`. ⚠️ A mi `claude-code` aliasunk **ütközik** ezzel.
+  A providers‑registry last‑writer‑wins → minket adna `claude-code`‑ra, az
+  auth‑registry first‑writer‑wins (`setdefault`) → az anthropicot. A split
+  zavaró; javasolt a `claude-code` alias elhagyása (pl. `claude-code-agent`).
+  Megkülönböztetés: az `anthropic` a **nyers Anthropic API/OAuth**; a mi
+  pluginunk a **Claude Code agenten** keresztül megy (saját rendszerprompt,
+  toolok, MCP) — két különböző dolog, jogosan külön provider.
+- **Minden valódi model‑provider** ugyanúgy néz ki, mint amit a könyvtár‑shimünk
+  csinál: `__init__.py` import‑időben `register_provider(ProviderProfile(...))`,
+  mellette `plugin.yaml (kind: model-provider)`. → A 8. pont könyvtár‑szerkezete
+  pontos.
