@@ -87,6 +87,10 @@ def test_build_options_none_exposes_no_mcp_server():
     options, _ = ClaudeBridge(Config())._build_options(_conv("none"))
     # No tools exposed -> no MCP server / allowed_tools wiring.
     assert not getattr(options, "mcp_servers", None)
+    # Claude Code's own native tools (Bash/Edit/WebFetch/...) must also be
+    # off, or a headless request could hang on an unanswerable permission
+    # prompt instead of behaving like a plain text-in/text-out call.
+    assert options.tools == []
 
 
 def test_build_options_function_directive_and_single_tool():

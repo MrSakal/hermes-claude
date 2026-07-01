@@ -773,6 +773,17 @@ class ClaudeBridge:
             if directive:
                 system = _append_system_prompt(system, directive)
             kwargs["system_prompt"] = system
+        else:
+            # No Hermes tools to expose — either none were requested, or
+            # tool_choice="none" suppressed them. Explicitly disable Claude
+            # Code's own native tools too (Bash/Edit/WebFetch/...) so a
+            # tool-less request behaves like a plain text-in/text-out
+            # chat-completions call, with no side effects on the host running
+            # the proxy. Without this, ClaudeAgentOptions.tools keeps its
+            # SDK default (the full native toolset) with no permission_mode
+            # set — headless, that risks Claude Code hanging on a
+            # tool-approval prompt nobody can answer.
+            kwargs["tools"] = []
         return ClaudeAgentOptions(**kwargs), captured
 
     async def _complete_sdk(self, conv: Conversation) -> BridgeResult:
