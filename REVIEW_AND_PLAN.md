@@ -486,3 +486,87 @@ A teljes fastruktúrát és a kulcsfájlokat a GitHub API‑n keresztül néztem
   csinál: `__init__.py` import‑időben `register_provider(ProviderProfile(...))`,
   mellette `plugin.yaml (kind: model-provider)`. → A 8. pont könyvtár‑szerkezete
   pontos.
+
+## 10. Plugin‑struktúra a hivatalos dokumentáció szerint
+
+Forrás: <https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins>,
+keresztellenőrizve a valódi, helyben telepített Hermes forrásával
+(`hermes_cli/plugins.py`, ~2300 sor). A doc egy **egyszerűsített** leírás — a
+tényleges parser gazdagabb mezőket ismer, ezért a végleges séma a **forrásból**
+lett levezetve, nem a doc minimál példájából.
+
+**Fő felismerés: két külön, egymástól független Hermes‑alrendszer érint minket:**
+
+| | `plugins/model-providers/hermes-claude-code/` | `plugins/hermes-claude-code/` (ÚJ) |
+| --- | --- | --- |
+| Felderítő | `providers._discover_providers` | `hermes_cli.plugins.PluginManager` |
+| `plugin.yaml kind` | `model-provider` | `standalone` |
+| `register()` hívása | a shim hívja saját magát import‑kor | Hermes importálja a modult, **ő maga hívja** `register(ctx)`‑t |
+| Opt‑in kell? | nem — mindig aktív | igen — `hermes plugins enable hermes-claude-code` |
+| Mit ad | „Claude Code" a `hermes model`‑ben, chat completions | `on_session_start` proxy‑autostart, `/claude-code` slash, `hermes claude-code` CLI |
+
+**Konkrét forrás‑megerősítések (`hermes_cli/plugins.py`):**
+- `PluginManifest` valódi mezői: `name, version, description, author,
+  requires_env, provides_tools, provides_hooks, kind, key` — tehát a `kind` és
+  `author` **igenis valódi, elemzett mezők** (a doc minimál példája ezt nem
+  mutatta be, de a parser kódja igen). `_VALID_PLUGIN_KINDS =
+  {"standalone", "backend", "exclusive", "platform", "model-provider"}`.
+- A régi (törölt) gyökér `plugin.yaml` `optional_env` mezője **soha nem is
+  létezett kulcsként** — a valódi séma `requires_env`. Kettősen indokolt volt
+  a törlése.
+- `kind == "model-provider"` esetén a `PluginManager` **rögzíti a manifestet
+  introspekcióhoz, de nem importálja újra a modult** — „handled by providers/
+  discovery" — így a modell‑provider könyvtár akkor sem okoz dupla
+  regisztrációt, ha a général scanner is meglátja (ellenőrizve: a bundled
+  scan explicit kihagyja a `model-providers` nevű alkönyvtárat
+  `skip_names`‑szel, de a **user‑scan nem** — `_scan_directory(user_dir,
+  source="user")` skip_names nélkül fut, tehát kategória‑könyvtárként
+  belenéz a `$HERMES_HOME/plugins/model-providers/`‑be is; ez ártalmatlan a
+  fenti no‑op ág miatt).
+- `_scan_entry_points()` **csak `name`‑et és `path`‑ot tölt ki** a
+  `PluginManifest`‑ben — `version/description/author/kind` mind üresen
+  marad (`kind` a dataclass‑default `"standalone"`‑ra esik). → A korábbi
+  `[project.entry-points."hermes_agent.plugins"]` bejegyzésünk emiatt **üres
+  metaadattal** jelent volna meg a `hermes plugins list`‑ben, ÉS mivel a
+  „later source overrides earlier" szabály szerint a pip‑forrás (4.) a
+  user‑könyvtár (2.) UTÁN fut le azonos kulcsra, a gazdagabb könyvtár‑alapú
+  manifestünket **csendben felülírta volna** az üres. → **A pip entry point
+  törölve**, helyette valódi könyvtár‑alapú általános plugin
+  (`plugins/hermes-claude-code/`).
+- `kind == "standalone"` (ide tartozik minden entry‑point plugin és a most
+  hozzáadott általános plugin is) **mindig opt‑in**: „Everything else
+  (standalone, user‑installed backends, entry‑point plugins) is opt‑in via
+  plugins.enabled." Ez könyvtár‑ vagy pip‑alapú forrástól függetlenül igaz —
+  a váltás a manifeszt‑minőségen javított, az opt‑in kötelezettségen nem.
+- `_load_plugin`: `register_fn = getattr(module, "register", None); ...
+  register_fn(ctx)` — a **PluginManager saját maga hívja** a `register`‑t egy
+  valódi `PluginContext`‑tel. Ez ellentétes a modell‑provider shim
+  konvenciójával (ami saját magát hívja import‑kor) — emiatt az új
+  `plugins/hermes-claude-code/__init__.py` **NEM hívhatja** a `register()`‑t,
+  csak exponálnia kell modul‑attribútumként, különben duplán futna.
+
+**Élőben, valódi Hermesen validálva** (`hermes_cli.plugins.get_plugin_manager`,
+`discover_plugins`, ideiglenes `$HERMES_HOME` + `config.yaml`):
+```
+BEFORE enable:  enabled=False, error="not enabled in config (run
+                 `hermes plugins enable hermes-claude-code` to activate)"
+AFTER  enable:  enabled=True, hooks_registered=['on_session_start'],
+                 commands_registered=['claude-code'],
+                 manifest name/version/description/author mind helyesen
+                 kitöltve (nem üres, ahogy a pip‑entry‑point út adta volna)
+```
+
+**Elvégzett átalakítás:**
+- ✅ Új `plugins/hermes-claude-code/{__init__.py, plugin.yaml, README.md}` —
+  `kind: standalone`, `provides_hooks: [on_session_start]`, `__init__.py`
+  **nem** hívja a `register()`‑t.
+- ✅ `install.py`: mindkét könyvtárat írja (`provider_plugin_dir` +
+  `general_plugin_dir`); `install()` visszaadja a
+  `hermes plugins enable hermes-claude-code` következő lépést.
+- ✅ `pyproject.toml`: a `[project.entry-points."hermes_agent.plugins"]` blokk
+  **törölve** (ütközne az új könyvtár‑manifesttel).
+- ✅ `plugin.py` docstringjei frissítve a két‑alrendszeres modellre.
+- ✅ `cli.py` telepítés‑utáni üzenete tartalmazza az opt‑in lépést.
+- ✅ README.md „Two plugin subsystems" táblázat + install lépések frissítve.
+- ✅ `tests/test_plugin_manifest_consistency.py` és `tests/test_install.py`
+  kibővítve mindkét shim‑párra.

@@ -3,11 +3,11 @@
 Usable without Hermes loaded, so users can install the provider and diagnose
 the bridge directly:
 
-    hermes-claude-code install     # write the discovery dir into $HERMES_HOME
+    hermes-claude-code install     # write both discovery dirs into $HERMES_HOME
     hermes-claude-code doctor      # dependency / auth / proxy diagnostics
     hermes-claude-code status      # proxy status
     hermes-claude-code start|stop  # manage the local proxy
-    hermes-claude-code uninstall   # remove the discovery dir
+    hermes-claude-code uninstall   # remove both discovery dirs
 """
 
 from __future__ import annotations
@@ -40,8 +40,12 @@ def main(argv: list[str] | None = None) -> int:
         result = install()
         print(json.dumps(result, indent=2))
         print(
-            "\nNext: `claude login` (subscription, no API key), then `hermes model` "
-            "— 'Claude Code' should appear."
+            "\nNext:\n"
+            "  1. `claude login` (subscription, no API key)\n"
+            "  2. `hermes plugins enable hermes-claude-code` (activates the "
+            "proxy autostart hook, /claude-code slash command, and hermes "
+            "claude-code CLI — optional; the model itself works without this)\n"
+            "  3. `hermes model` — 'Claude Code' should appear."
         )
         return 0
     if action == "uninstall":
