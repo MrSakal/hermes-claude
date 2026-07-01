@@ -46,6 +46,30 @@ def test_no_claude_code_alias_collision():
     assert "claude-code" not in PROVIDER_ALIASES
 
 
+# auth_type values Hermes' hermes_cli/models.py CANONICAL_PROVIDERS auto-extend
+# explicitly skips ("non-api-key flows need bespoke picker UX; skip
+# auto-inject") when building the list the interactive TUI/desktop model
+# picker actually reads. providers.list_providers()/PROVIDER_REGISTRY are a
+# SEPARATE list from CANONICAL_PROVIDERS: a provider can be fully functional
+# (registered, authenticated, serving chat completions when selected via
+# config.yaml or --provider) while being completely absent from the
+# interactive picker if its auth_type lands in this set. Verified live: this
+# is exactly what "responds via the provider but can't be selected in the
+# TUI/desktop" looks like from the outside.
+_TUI_PICKER_SKIPPED_AUTH_TYPES = {
+    "oauth_device_code",
+    "oauth_external",
+    "external_process",
+    "aws_sdk",
+    "copilot",
+}
+
+
+def test_auth_type_is_selectable_in_the_tui_desktop_picker():
+    p = provider.build_profile(Config())
+    assert p.auth_type not in _TUI_PICKER_SKIPPED_AUTH_TYPES
+
+
 def test_fetch_models_fallback_when_proxy_down(monkeypatch):
     p = provider.build_profile(Config(port=1))  # nothing listening
 
