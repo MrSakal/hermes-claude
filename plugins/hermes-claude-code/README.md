@@ -15,11 +15,16 @@ independently of this one.
 
 Because `plugin.yaml` declares `kind: standalone`, Hermes gates it behind an
 explicit opt-in — every `standalone` plugin is, directory-based or
-pip-entry-point alike:
+pip-entry-point alike. `hermes-claude-code install` (below) flips this on
+automatically by writing `plugins.enabled` in `config.yaml` via Hermes' own
+`load_config`/`save_config` — the exact mechanism behind:
 
 ```bash
 hermes plugins enable hermes-claude-code
 ```
+
+...so you only need to run that by hand if auto-enable couldn't (see the
+main README's Install section for when that happens).
 
 Install this directory (and the model-provider one) with:
 
