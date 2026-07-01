@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -338,18 +339,117 @@ def _prompt_urls(conv: Conversation) -> list[str]:
     return conv._url_cache
 
 
+def _tool_name_of(tool: Any) -> str | None:
+    if not isinstance(tool, dict):
+        return None
+    if tool.get("type") == "function" and isinstance(tool.get("function"), dict):
+        name = tool["function"].get("name")
+    else:
+        name = tool.get("name")
+    return str(name) if name else None
+
+
 def _tool_names(tools: list[dict[str, Any]]) -> set[str]:
     names: set[str] = set()
     for tool in tools or []:
-        if not isinstance(tool, dict):
-            continue
-        if tool.get("type") == "function" and isinstance(tool.get("function"), dict):
-            name = tool["function"].get("name")
-        else:
-            name = tool.get("name")
+        name = _tool_name_of(tool)
         if name:
-            names.add(str(name))
+            names.add(name)
     return names
+
+
+def normalize_tool_choice(tool_choice: Any) -> tuple[str, str | None]:
+    """Normalise an OpenAI/Anthropic ``tool_choice`` into ``(kind, name)``.
+
+    ``kind`` is one of ``auto`` (model decides), ``none`` (no tool may be
+    called), ``required`` (some tool must be called), or ``function`` (the named
+    tool must be called, returned as ``name``). Unknown shapes degrade to
+    ``auto`` so an odd payload never blocks a response.
+    """
+    if tool_choice is None:
+        return ("auto", None)
+    if isinstance(tool_choice, str):
+        v = tool_choice.strip().lower()
+        return (v, None) if v in ("none", "required", "auto") else ("auto", None)
+    if isinstance(tool_choice, dict):
+        fn = tool_choice.get("function")
+        if isinstance(fn, dict) and fn.get("name"):
+            return ("function", str(fn["name"]))
+        kind = str(tool_choice.get("type") or "").strip().lower()
+        if kind == "any":  # Anthropic spelling of "required"
+            return ("required", None)
+        if kind in ("none", "auto"):
+            return (kind, None)
+        if kind == "tool" and tool_choice.get("name"):  # Anthropic forced tool
+            return ("function", str(tool_choice["name"]))
+    return ("auto", None)
+
+
+def effective_tools(conv: "Conversation") -> list[dict[str, Any]]:
+    """Tools to expose to Claude Code given ``conv.tool_choice``.
+
+    ``none`` exposes nothing (so Claude cannot call any tool); a forced function
+    exposes only that tool when present. Everything else exposes all tools.
+    """
+    kind, name = normalize_tool_choice(conv.tool_choice)
+    if kind == "none":
+        return []
+    if kind == "function" and name:
+        only = [t for t in conv.tools if _tool_name_of(t) == name]
+        return only or conv.tools
+    return conv.tools
+
+
+def _tool_choice_directive(kind: str, name: str | None) -> str | None:
+    if kind == "required":
+        return (
+            "You MUST call one of the available Hermes MCP tools to satisfy this "
+            "request. Do not answer with plain text instead of a tool call."
+        )
+    if kind == "function" and name:
+        return (
+            f"You MUST call the Hermes MCP tool '{name}' to satisfy this request. "
+            "Do not call any other tool and do not answer with plain text."
+        )
+    return None
+
+
+def apply_tool_choice(conv: "Conversation", result: "BridgeResult") -> "BridgeResult":
+    """Enforce ``tool_choice`` on a finished result (defensive post-pass).
+
+    ``none`` strips any tool calls and restores text; a forced function keeps
+    only the matching call. ``required``/``auto`` pass through unchanged — a
+    missing required call is steered via the system prompt, never fabricated.
+    """
+    kind, name = normalize_tool_choice(conv.tool_choice)
+    if kind == "none":
+        if not result.tool_calls:
+            return result
+        return BridgeResult(
+            text=result.text,
+            tool_calls=[],
+            finish_reason="stop",
+            session_id=result.session_id,
+            backend=result.backend,
+            reasoning_content=result.reasoning_content,
+        )
+    if kind == "function" and name and result.tool_calls:
+        kept = [
+            tc
+            for tc in result.tool_calls
+            if (tc.get("function") or {}).get("name") == name
+        ]
+        if kept == result.tool_calls:
+            return result
+        return BridgeResult(
+            text="" if kept else result.text,
+            tool_calls=kept,
+            finish_reason="tool_calls" if kept else "stop",
+            session_id=result.session_id,
+            backend=result.backend,
+            reasoning_content=result.reasoning_content,
+        )
+    return result
 
 
 def _latest_user_segment(prompt: str) -> str:
@@ -425,6 +525,9 @@ def _host_tool_call_for_hermes_home_listing(conv: Conversation) -> BridgeResult 
 
 def preemptive_host_tool_call(conv: Conversation) -> BridgeResult | None:
     """Return an immediate Hermes host-tool call for deterministic cases."""
+    # tool_choice="none" forbids any tool call; never preempt with one.
+    if normalize_tool_choice(conv.tool_choice)[0] == "none":
+        return None
     return _host_tool_call_for_url(conv) or _host_tool_call_for_hermes_home_listing(conv)
 
 
@@ -569,6 +672,21 @@ class ClaudeBridge:
     def __init__(self, config: Config | None = None) -> None:
         self.config = config or get_config()
 
+    # -- auth env hygiene -------------------------------------------------- #
+    def _backend_env(self) -> dict[str, str] | None:
+        """Environment for the Claude Code backend, or None to inherit as-is.
+
+        With ``force_subscription`` on, ANTHROPIC_API_KEY is removed so Claude
+        Code falls back to the ``claude login`` subscription (OAuth) instead of
+        silently billing at API rates. Off by default → returns None so the
+        backend inherits the process environment unchanged (current behaviour).
+        """
+        if not self.config.force_subscription:
+            return None
+        env = dict(os.environ)
+        env.pop("ANTHROPIC_API_KEY", None)
+        return env
+
     # -- public API -------------------------------------------------------- #
     async def complete(self, conv: Conversation) -> BridgeResult:
         if sdk_available():
@@ -623,6 +741,9 @@ class ClaudeBridge:
         from claude_agent_sdk import ClaudeAgentOptions
 
         kwargs: dict[str, Any] = {"model": conv.backend_model}
+        backend_env = self._backend_env()
+        if backend_env is not None:
+            kwargs["env"] = backend_env
         if conv.system_prompt:
             kwargs["system_prompt"] = conv.system_prompt
         if conv.cwd:
@@ -633,7 +754,9 @@ class ClaudeBridge:
         if conv.resume:
             kwargs["resume"] = conv.resume
 
-        server, allowed, captured = mcp_server.build_sdk_mcp_server(conv.tools)
+        server, allowed, captured = mcp_server.build_sdk_mcp_server(
+            effective_tools(conv)
+        )
         if server is not None:
             kwargs["tools"] = []
             kwargs["mcp_servers"] = {mcp_server.MCP_SERVER_NAME: server}
@@ -642,9 +765,25 @@ class ClaudeBridge:
             if conv.mode == "strict":
                 kwargs["max_turns"] = 1
             kwargs["allowed_tools"] = allowed
-            kwargs["system_prompt"] = _append_system_prompt(
+            system = _append_system_prompt(
                 kwargs.get("system_prompt"), _HERMES_TOOL_SYSTEM_PROMPT
             )
+            kind, name = normalize_tool_choice(conv.tool_choice)
+            directive = _tool_choice_directive(kind, name)
+            if directive:
+                system = _append_system_prompt(system, directive)
+            kwargs["system_prompt"] = system
+        else:
+            # No Hermes tools to expose — either none were requested, or
+            # tool_choice="none" suppressed them. Explicitly disable Claude
+            # Code's own native tools too (Bash/Edit/WebFetch/...) so a
+            # tool-less request behaves like a plain text-in/text-out
+            # chat-completions call, with no side effects on the host running
+            # the proxy. Without this, ClaudeAgentOptions.tools keeps its
+            # SDK default (the full native toolset) with no permission_mode
+            # set — headless, that risks Claude Code hanging on a
+            # tool-approval prompt nobody can answer.
+            kwargs["tools"] = []
         return ClaudeAgentOptions(**kwargs), captured
 
     async def _complete_sdk(self, conv: Conversation) -> BridgeResult:
@@ -710,7 +849,8 @@ class ClaudeBridge:
             reasoning_content="".join(reasoning_parts),
         )
         result = result.with_captured_tool_calls(captured, mode=conv.mode)
-        return _recover_host_tool_call(conv, result)
+        result = _recover_host_tool_call(conv, result)
+        return apply_tool_choice(conv, result)
 
     async def _stream_sdk(self, conv: Conversation) -> AsyncIterator[dict[str, Any]]:
         from claude_agent_sdk import (
@@ -774,6 +914,7 @@ class ClaudeBridge:
             reasoning_content="".join(reasoning_parts),
         ).with_captured_tool_calls(captured, mode=conv.mode)
         result = _recover_host_tool_call(conv, result)
+        result = apply_tool_choice(conv, result)
         if result.finish_reason != "tool_calls" and result.text:
             _raise_if_claude_api_error(result.text)
             yield {"type": "text", "text": result.text}
@@ -812,6 +953,7 @@ class ClaudeBridge:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=conv.cwd or None,
+            env=self._backend_env(),
         )
         out, err = await proc.communicate(conv.prompt.encode("utf-8"))
         if proc.returncode != 0:

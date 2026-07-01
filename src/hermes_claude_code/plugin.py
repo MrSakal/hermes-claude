@@ -1,11 +1,21 @@
 """Hermes plugin entrypoint for Hermes Claude Code.
 
-Loaded via the ``hermes_agent.plugins`` entry point. On ``register(ctx)`` it:
+Shared by Hermes' two separate plugin subsystems (see ``install.py`` for the
+directory layout each expects):
 
-  * registers the ``hermes-claude-code`` provider profile,
-  * starts the local proxy on session start (best-effort),
-  * exposes ``hermes claude-code <status|start|stop|doctor>`` CLI commands,
-  * exposes a ``/claude-code`` slash command.
+  * ``providers._discover_providers`` imports
+    ``plugins/model-providers/hermes-claude-code/__init__.py``, which calls
+    ``register(ctx=None)`` at import time — this half just registers the
+    provider profile and always runs, no opt-in needed.
+  * ``hermes_cli.plugins.PluginManager`` imports
+    ``plugins/hermes-claude-code/__init__.py`` and calls ``register(ctx)``
+    itself with a real ``PluginContext`` — this half additionally starts the
+    local proxy on session start (best-effort), exposes
+    ``hermes claude-code <status|start|stop|doctor>`` CLI commands, and
+    exposes a ``/claude-code`` slash command. Its manifest's
+    ``kind: standalone`` makes Hermes gate it behind
+    ``hermes plugins enable hermes-claude-code`` — ``install.py`` flips this
+    automatically as part of ``install()``, so it's rarely a manual step.
 """
 
 from __future__ import annotations
@@ -82,9 +92,30 @@ def _cli_handler(args) -> int:
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
-def register(ctx) -> None:
-    """Hermes plugin entry point."""
+def register(ctx=None) -> None:
+    """Hermes plugin entry point.
+
+    Callable two ways:
+
+      * **Model-provider discovery shim** — invoked with no arguments
+        (``ctx is None``) by ``plugins/model-providers/hermes-claude-code/
+        __init__.py``. The provider profile is registered; the optional
+        session-hook / CLI / slash-command wiring is simply skipped because it
+        needs a plugin context.
+      * **General-plugin loader** — invoked by ``hermes_cli.plugins
+        .PluginManager`` (via ``plugins/hermes-claude-code/__init__.py``) with
+        a ``ctx`` that exposes ``register_hook`` / ``register_cli_command`` /
+        ``register_command``.
+
+    Provider registration always runs first so the model picker is populated in
+    either path — harmless to repeat if both shims happen to load in the same
+    process, since it's the same name/profile going into the same registry.
+    ``ctx`` being absent (or lacking a method) is not an error.
+    """
     register_provider_profile()
+
+    if ctx is None:
+        return
 
     def _on_session_start(**_kwargs: Any) -> None:
         try:

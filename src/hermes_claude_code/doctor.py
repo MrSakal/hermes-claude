@@ -39,10 +39,17 @@ def run_doctor(config: Config | None = None, live: bool = False) -> dict[str, An
         )
     )
 
+    # Subscription (OAuth) is the preferred auth: the bridge inherits the
+    # `claude login` credential store, so Pro/Max usage works with no API key
+    # and no extra-usage billing. An ANTHROPIC_API_KEY, if present, silently
+    # OVERRIDES the subscription and bills at API rates — so it is reported as a
+    # warning, not as the green path.
+    warnings: list[str] = []
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
-    auth_ok = has_key
-    auth_detail = "ANTHROPIC_API_KEY set" if has_key else "ANTHROPIC_API_KEY not set"
-    if not has_key and cli:
+
+    oauth_ok = False
+    oauth_detail = ""
+    if cli:
         try:
             res = subprocess.run(
                 [cli, "auth", "status"],
@@ -50,11 +57,28 @@ def run_doctor(config: Config | None = None, live: bool = False) -> dict[str, An
                 text=True,
                 timeout=15,
             )
-            auth_ok = res.returncode == 0
-            auth_detail = (res.stdout or res.stderr or "").strip() or auth_detail
+            oauth_ok = res.returncode == 0
+            oauth_detail = (res.stdout or res.stderr or "").strip()
         except Exception as exc:
-            auth_detail = f"could not run 'claude auth status': {exc}"
+            oauth_detail = f"could not run 'claude auth status': {exc}"
+
+    if oauth_ok:
+        auth_ok = True
+        auth_detail = f"Claude login (subscription/OAuth) active — {oauth_detail}".strip(" —")
+    elif has_key:
+        auth_ok = True
+        auth_detail = "authenticated via ANTHROPIC_API_KEY (API billing)"
+    else:
+        auth_ok = False
+        auth_detail = oauth_detail or "not authenticated (run `claude login` for subscription use)"
     checks.append(_check(auth_ok, "auth", auth_detail))
+
+    if has_key:
+        warnings.append(
+            "ANTHROPIC_API_KEY is set — it OVERRIDES your Claude subscription and "
+            "bills at API rates. Unset it (and `claude login`) to use Pro/Max, or "
+            "set HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION=1 to have the bridge ignore it."
+        )
 
     if not sdk and not cli:
         checks.append(
@@ -74,6 +98,7 @@ def run_doctor(config: Config | None = None, live: bool = False) -> dict[str, An
     report: dict[str, Any] = {
         "ok": all(c["ok"] for c in checks),
         "checks": checks,
+        "warnings": warnings,
         "proxy": status,
     }
 
@@ -115,6 +140,8 @@ def format_report(report: dict[str, Any]) -> str:
         mark = "✓" if live.get("ok") else "✗"
         detail = live.get("text") or live.get("error") or ""
         lines.append(f"  {mark} live probe: {detail}")
+    for warning in report.get("warnings") or []:
+        lines.append(f"  ⚠ {warning}")
     lines.append("")
     lines.append("Overall: " + ("OK" if report["ok"] else "ISSUES FOUND"))
     return "\n".join(lines)

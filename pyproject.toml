@@ -17,10 +17,8 @@ sdk = [
     "claude-agent-sdk>=0.2.110",
 ]
 
-[project.entry-points."hermes_agent.plugins"]
-hermes-claude-code = "hermes_claude_code.plugin"
-
 [project.scripts]
+hermes-claude-code = "hermes_claude_code.cli:main"
 hermes-claude-code-proxy = "hermes_claude_code.proxy:main"
 
 [build-system]
