@@ -8,6 +8,7 @@ context (plugin register, proxy subprocess, tests).
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -59,10 +60,23 @@ DEFAULT_AUX_MODEL = "Haiku 4.5"
 
 
 def hermes_home() -> Path:
-    """Return the Hermes home directory ($HERMES_HOME or ~/.hermes)."""
-    env = os.environ.get("HERMES_HOME")
+    """Return the Hermes home directory.
+
+    Must mirror ``hermes_constants._get_platform_default_hermes_home()`` in
+    the real Hermes source exactly, or ``hermes-claude-code install`` writes
+    the discovery dirs into a path Hermes never looks at. Verified live on
+    Windows: with ``HERMES_HOME`` unset, real Hermes resolves to
+    ``%LOCALAPPDATA%\\hermes`` — *not* ``~/.hermes`` (that's the
+    Linux/macOS-only default). Getting this wrong is silent: `install`
+    reports success, but the provider never appears in `hermes model`.
+    """
+    env = os.environ.get("HERMES_HOME", "").strip()
     if env:
         return Path(env).expanduser()
+    if sys.platform == "win32":
+        local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+        base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
+        return base / "hermes"
     return Path.home() / ".hermes"
 
 

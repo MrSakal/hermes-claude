@@ -618,3 +618,29 @@ szól — a 10. pontban tárgyalt „két alrendszer" kérdéstől független, t
 - README kiegészítve a doksi saját ellenőrző receptjével
   (`hermes -z "hello" --provider hermes-claude-code -m sonnet`, `hermes doctor`)
   és egy „ProviderProfile field reference" táblázattal.
+
+## 12. `hermes_home()` — valódi hiba Windows‑on (megtalálva a felhasználó saját gépén)
+
+A felhasználó gépén (Windows) a valódi, telepített Hermes ellen futtatva:
+`hermes_constants.get_hermes_home()` → `%LOCALAPPDATA%\hermes`
+(`C:\Users\<user>\AppData\Local\hermes`), **NEM** `~/.hermes`. A mi
+`config.py hermes_home()`‑unk viszont eddig feltétel nélkül `Path.home() /
+".hermes"`‑t adott vissza, ha a `HERMES_HOME` env változó nincs beállítva.
+
+**Ez azt jelentette volna, hogy `HERMES_HOME` explicit beállítása nélkül a
+`hermes-claude-code install` Windows‑on egy olyan könyvtárba írt volna
+(`~/.hermes`), amit a valódi Hermes sosem néz meg** — az `install` sikert
+jelentett volna, de a provider sosem jelenne meg a `hermes model`‑ben, néma,
+nehezen debuggolható hibaként.
+
+**Javítás** (`config.py hermes_home()`): pontosan lemásolja a valódi
+`hermes_constants._get_platform_default_hermes_home()` logikáját —
+`win32`‑n `%LOCALAPPDATA%\hermes` (fallback `~/AppData/Local/hermes`, ha a
+env var üres), egyébként `~/.hermes`. `HERMES_HOME` env var továbbra is
+mindig felülír mindent.
+
+Élőben ellenőrizve a felhasználó gépén: a javított `hermes_home()` és a
+valódi `hermes_constants.get_hermes_home()` **pontosan ugyanazt az útvonalat**
+adja vissza (`C:\Users\...\AppData\Local\hermes`). Új teszt:
+`tests/test_config.py` (4 eset: env‑var felülír, win32 LOCALAPPDATA‑val,
+win32 LOCALAPPDATA nélkül, nem‑win32).
