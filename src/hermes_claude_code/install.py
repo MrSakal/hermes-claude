@@ -16,13 +16,15 @@ Hermes has two separate plugin subsystems that both apply to this package
   CLI subcommand. Its manifest declares ``kind: standalone``, which Hermes
   gates behind an explicit opt-in — every ``kind: standalone`` plugin is,
   directory-based or pip-entry-point alike; there is no way around the gate
-  itself. What we *can* do from our side is flip it automatically: ``install()``
-  reuses Hermes' own ``hermes_cli.config.load_config``/``save_config`` (the
-  exact functions ``hermes plugins enable`` itself calls) to add
-  ``hermes-claude-code`` to ``plugins.enabled`` in ``config.yaml``, so the
-  manual enable step is skipped whenever that's possible. Best-effort: falls
-  back to reporting the manual command if ``hermes_cli`` isn't importable
-  (standalone install) or the config is Nix/managed (refuses external writes).
+  itself. What we *can* do from our side is flip it automatically:
+  ``install()`` shells out to the **documented** ``hermes plugins enable
+  hermes-claude-code`` command (Hermes' own public CLI, listed in its plugin
+  docs under "Plugin Management Commands") so the manual step is skipped
+  whenever ``hermes`` is on ``PATH``. Deliberately *not* done by importing
+  Hermes' internal config-writing functions directly — those aren't a public,
+  documented interface, so calling the real CLI command is the more stable
+  choice even though it costs a subprocess call. Best-effort: falls back to
+  reporting the manual command if ``hermes`` isn't found or the command fails.
 
 Both directories are written by ``install()`` rather than asking the user to
 copy files by hand; the model-provider one works immediately, the general
@@ -107,42 +109,47 @@ def general_plugin_dir(hermes_home_override: str | Path | None = None) -> Path:
     return home / "plugins" / PROVIDER_NAME
 
 
-def _auto_enable_general_plugin(*, load_config=None, save_config=None) -> bool:
-    """Best-effort: add ``PROVIDER_NAME`` to config.yaml's ``plugins.enabled``.
+def _auto_enable_general_plugin(*, which=None, run=None) -> bool:
+    """Best-effort: run the documented ``hermes plugins enable <name>`` command.
 
-    Mirrors exactly what ``hermes plugins enable hermes-claude-code`` does —
-    reuses Hermes' own ``load_config``/``save_config`` (the real functions
-    that command calls) rather than hand-rolling YAML edits, so this is no
-    riskier than a user running that command themselves. Returns ``True`` iff
-    the plugin ends up enabled (already was, or was just added); ``False`` if
-    ``hermes_cli`` isn't importable (standalone/non-Hermes environment) or the
-    config refused the write (e.g. a Nix-managed install) — the caller should
-    fall back to telling the user to run the command by hand.
+    Uses Hermes' public CLI — the same command from its own "Plugin
+    Management Commands" docs — rather than importing internal
+    ``hermes_cli`` config-writing functions. Slower (a subprocess call) but
+    stays correct across Hermes versions, since a documented CLI command is a
+    much more stable contract than an undocumented internal API. Returns
+    ``True`` iff the command ran and exited 0; ``False`` if ``hermes`` isn't
+    on ``PATH`` or the command fails for any reason — the caller should then
+    fall back to telling the user to run it by hand.
 
-    ``load_config``/``save_config`` are injectable for testing; production
-    callers leave them unset and get the real ``hermes_cli.config`` functions.
+    ``which``/``run`` are injectable for testing (defaults:
+    ``shutil.which``/``subprocess.run``).
+
+    Always passes ``--no-allow-tool-override``: for any non-bundled plugin,
+    ``hermes plugins enable`` otherwise prompts interactively on a TTY it
+    doesn't have here — read once via ``sys.stdin`` and blocks forever on a
+    subprocess whose stdin is closed/empty (confirmed live: the un-flagged
+    command hung until the 30s timeout). We never register a tool
+    (``ctx.register_tool`` is never called), so declining the tool-override
+    grant has no effect on us either way — it's a real permission the flag
+    controls, just not one this plugin needs.
     """
-    if load_config is None or save_config is None:
-        try:
-            from hermes_cli import config as _hermes_config
-        except Exception:
-            return False
-        load_config = load_config or _hermes_config.load_config
-        save_config = save_config or _hermes_config.save_config
+    import shutil
+    import subprocess
+
+    which = which or shutil.which
+    run = run or subprocess.run
+
+    hermes_exe = which("hermes")
+    if not hermes_exe:
+        return False
     try:
-        config = load_config()
-        plugins_cfg = config.get("plugins")
-        if not isinstance(plugins_cfg, dict):
-            plugins_cfg = {}
-            config["plugins"] = plugins_cfg
-        enabled = plugins_cfg.get("enabled")
-        enabled_set = set(enabled) if isinstance(enabled, list) else set()
-        if PROVIDER_NAME in enabled_set:
-            return True
-        enabled_set.add(PROVIDER_NAME)
-        plugins_cfg["enabled"] = sorted(enabled_set)
-        save_config(config)
-        return True
+        result = run(
+            [hermes_exe, "plugins", "enable", PROVIDER_NAME, "--no-allow-tool-override"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return getattr(result, "returncode", 1) == 0
     except Exception:
         return False
 
@@ -155,10 +162,10 @@ def install(
     With ``auto_enable`` (default), also tries to flip the general plugin's
     opt-in gate on — see :func:`_auto_enable_general_plugin`. Skipped when
     ``hermes_home_override`` is given: that targets an alternate directory,
-    but Hermes' own ``load_config``/``save_config`` always operate on the
-    real, ambient ``$HERMES_HOME`` — writing there would target the wrong
-    installation (this is also why every test passes an override and never
-    exercises a real config.yaml write).
+    but the real ``hermes`` CLI always operates against the real, ambient
+    ``$HERMES_HOME`` — running it here would target the wrong installation
+    (this is also why every test passes an override rather than relying on
+    ``hermes`` actually being on ``PATH``).
     """
     provider_dest = provider_plugin_dir(hermes_home_override)
     provider_dest.mkdir(parents=True, exist_ok=True)
