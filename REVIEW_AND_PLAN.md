@@ -401,12 +401,38 @@ mellett készült.
   `required`/`{"type":"any"}` (kötelező tool, rendszerpromptból terelve),
   konkrét függvény (csak az az egy tool exponálva + a többi hívás kiszűrve).
   Tesztelve (`tests/test_tool_choice.py`).
+- ✅ **Tiszta szöveg‑LLM mód, amikor Hermes nem ad át toolt** (`_build_options`,
+  `bridge.py`): ha nincs exponálandó Hermes‑tool (sem tool nem érkezett, sem
+  `tool_choice="none"` nem oltotta ki őket), a bridge explicit
+  `tools=[]`‑t állít be a Claude Agent SDK‑n. Enélkül a `ClaudeAgentOptions`
+  a saját alapértelmezésével (a teljes natív toolkészlet — Bash, Edit,
+  WebFetch stb. — `permission_mode=None`‑nel) indulna, ami headless
+  környezetben egy sosem érkező jóváhagyásra várva **beragadhat**. Ezzel
+  a Claude Code egy ilyen hívásnál pontosan úgy viselkedik, mint egy sima
+  chat‑completions modell: szöveg be, szöveg ki, semmilyen oldalhatás a
+  proxyt futtató gépen. (Élőben az SDK‑ból ellenőrizve:
+  `ClaudeAgentOptions()` alapértelmezése `permission_mode=None`,
+  `allowed_tools=[]`, `can_use_tool=None` — tehát a rés valós volt.)
+  Tesztelve (`tests/test_request_options.py`,
+  `tests/test_tool_choice.py::test_build_options_none_exposes_no_mcp_server`).
 
 **Továbbra is elhalasztva (alacsony prioritás):**
 - ⏳ Modellkatalógus id‑alapúra (most display‑nevek + `MODEL_ID_ALIASES`, ami
   **működik**).
 - ⏳ A strict‑mód magyar regex heurisztikáinak visszavágása / env‑flag mögé
-  tétele (P2).
+  tétele (P2). Megjegyzés: ezek a heurisztikák csak akkor sülnek el, ha
+  Hermes ténylegesen tool‑listát ad át *és* strict módban vagyunk — a fenti
+  tiszta‑LLM javítás (tool nélküli hívás) ettől független, és nem teszi
+  feleslegessé ezt a tételt.
+- ⏳ Proxy idle‑shutdown + portütközés‑kezelés; `/v1/models` cache (P2).
+
+**Szándékosan elvetett alternatíva:** a tool nélküli hívásnál felmerült az is,
+hogy Claude Code fusson **teljesen önállóan a saját natív tooljaival**
+(`permission_mode="bypassPermissions"`, Bash/fájlírás engedélyezve) — ez lenne
+a „hadd csinálja Claude Code a saját dolgát" legerősebb változata. Ezt a
+felhasználó explicit **elutasította** biztonsági megfontolásból (a proxy‑gépen
+felügyelet nélküli írás/parancsfuttatás Hermes kérésre túl nagy blast radius),
+és a fenti `tools=[]` (teljes letiltás) mellett döntött.
 
 ## 9. Verifikálva a valódi forrás ellen (NousResearch/hermes-agent)
 
