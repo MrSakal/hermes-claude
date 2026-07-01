@@ -24,6 +24,7 @@ from .config import (
     LOCAL_API_KEY,
     PROVIDER_ALIASES,
     PROVIDER_NAME,
+    SIGNUP_URL,
     Config,
     get_config,
 )
@@ -69,7 +70,19 @@ except Exception:  # pragma: no cover - depends on runtime
 
 
 class ClaudeCodeProviderProfile(_BaseProfile):
-    """Provider profile that fetches its model list from the local proxy."""
+    """Provider profile that fetches its model list from the local proxy.
+
+    ``ProviderProfile`` has three other overridable hooks per Hermes' model-
+    provider plugin docs: ``prepare_messages``, ``build_extra_body``, and
+    ``build_api_kwargs_extras``. These exist for providers whose outbound
+    wire format needs a client-side tweak (extra body fields, non-standard
+    kwargs, message massaging) before Hermes' own HTTP client sends the
+    request. We deliberately don't override them: our proxy accepts a plain,
+    unmodified OpenAI ``chat/completions`` request and does every Claude Code
+    -specific translation itself, server-side, in ``bridge.py``. Leaving
+    these at the base class' pass-through defaults is the correct choice for
+    us, not an oversight.
+    """
 
     def fetch_models(
         self,
@@ -115,6 +128,7 @@ def build_profile(config: Config | None = None) -> ClaudeCodeProviderProfile:
         api_mode="chat_completions",
         display_name=DISPLAY_NAME,
         description=DESCRIPTION,
+        signup_url=SIGNUP_URL,
         # ``api_key`` (not ``external_process``): Hermes' auth.py auto-extend
         # registers any api_key profile with non-empty ``env_vars`` into
         # PROVIDER_REGISTRY (inference_base_url=base_url, api_key_env_vars and
@@ -125,6 +139,10 @@ def build_profile(config: Config | None = None) -> ClaudeCodeProviderProfile:
         auth_type="api_key",
         env_vars=(API_KEY_ENV_VAR, BASE_URL_ENV_VAR),
         base_url=cfg.base_url,
+        # models_url intentionally left unset: our proxy's models endpoint is
+        # exactly {base_url}/models, which is the documented ProviderProfile
+        # default when models_url is empty — and our fetch_models() override
+        # below builds that same URL directly anyway.
         supports_health_check=True,
         supports_vision=True,
         fallback_models=FALLBACK_MODELS,

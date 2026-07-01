@@ -69,6 +69,14 @@ active `$HERMES_HOME` (check `echo $HERMES_HOME`).
 
 `doctor` reports exactly what's missing (SDK, `claude` CLI, auth, or proxy).
 
+Hermes' own model-provider plugin docs recommend a one-shot smoke test against
+the provider id directly, bypassing `config.yaml`:
+
+```bash
+hermes -z "hello" --provider hermes-claude-code -m sonnet
+hermes doctor
+```
+
 **Auth — use your Claude subscription, no API key.** The bridge runs Claude Code
 with whatever credentials `claude` is logged in with, so a `claude login`
 (Pro/Max/Team/Enterprise OAuth) just works — no API key, no extra-usage billing.
@@ -166,6 +174,26 @@ no core edits — `inference_base_url` becomes the localhost proxy and the key i
 read from the env var. The key is a non-empty **placeholder** the proxy throws
 away; it is unrelated to Claude billing. Your Pro/Max subscription is used by
 the `claude login` credentials the bridge inherits.
+
+### ProviderProfile field reference
+
+Cross-checked field-by-field against Hermes' model-provider plugin docs
+(`providers/base.py`'s `ProviderProfile`), in `src/hermes_claude_code/provider.py`:
+
+| Field | Our value | Why |
+| --- | --- | --- |
+| `api_mode` | `chat_completions` | our proxy speaks the standard OpenAI wire format |
+| `auth_type` | `api_key` | the only `auth_type` Hermes' `PROVIDER_REGISTRY` auto-extends without core edits |
+| `env_vars` | `(HERMES_CLAUDE_CODE_API_KEY, HERMES_CLAUDE_CODE_BASE_URL)` | key var(s) first, a trailing `*_BASE_URL` entry last — exactly the documented convention |
+| `signup_url` | our own Install section | auth is `claude login` (CLI OAuth), not a web signup page, so this points at the real setup steps instead |
+| `models_url` | unset | defaults to `{base_url}/models`, which is exactly our proxy's route; `fetch_models()` builds that URL directly anyway |
+| `fixed_temperature` / `default_max_tokens` | unset | no provider-level cap; the bridge forwards these best-effort per request |
+
+`ProviderProfile` also supports overriding `prepare_messages` /
+`build_extra_body` / `build_api_kwargs_extras` for providers that need
+Hermes' own outbound HTTP request tweaked client-side. We don't override any
+of them — our proxy accepts a plain, unmodified request and does every
+Claude Code-specific translation itself, server-side.
 
 ### Two plugin subsystems
 
