@@ -570,3 +570,51 @@ AFTER  enable:  enabled=True, hooks_registered=['on_session_start'],
 - ✅ README.md „Two plugin subsystems" táblázat + install lépések frissítve.
 - ✅ `tests/test_plugin_manifest_consistency.py` és `tests/test_install.py`
   kibővítve mindkét shim‑párra.
+
+## 11. A modell‑provider plugin doksi szerinti mezőellenőrzés
+
+Forrás: <https://hermes-agent.nousresearch.com/docs/developer-guide/model-provider-plugin>.
+Ez a doc kifejezetten a `ProviderProfile` mezőiről és a `plugin.yaml` sémáról
+szól — a 10. pontban tárgyalt „két alrendszer" kérdéstől független, tisztán a
+**mit kell tartalmaznia a providerünknek** kérdés.
+
+**Mezőnkénti összevetés (`provider.py` `build_profile`):**
+- `name/aliases/api_mode/display_name/description/env_vars/base_url/
+  auth_type/fallback_models/default_aux_model` — mind pontosan illeszkedik a
+  doksi táblázatához és a korábbi (9. pont) forrás‑ellenőrzéshez.
+- **`signup_url` hiányzott** — ez egy valódi, a doksi által is felsorolt mező
+  („Shown during first‑run setup"), amit korábban nem állítottunk be. Mivel a
+  hitelesítés `claude login` (CLI OAuth), nem webes API‑kulcs‑regisztráció,
+  egy generikus claude.ai‑link helyett a **saját repó Install szekciójára**
+  mutat (`SIGNUP_URL` konstans, `config.py`) — ez ténylegesen segít a
+  felhasználónak, a generikus link nem mondaná el a `claude login` +
+  `hermes-claude-code install` lépéseket.
+- `models_url` — szándékosan üresen hagyva; a doksi szerinti alapértelmezés
+  (`{base_url}/models`) pontosan egyezik a proxynk útvonalával, és a saját
+  `fetch_models()` felülírásunk úgyis közvetlenül ezt az URL‑t építi.
+- **Felülírható hookok** (`prepare_messages`, `build_extra_body`,
+  `build_api_kwargs_extras`) — szándékosan **nincsenek felülírva**: ezek a
+  Hermes‑oldali (kliens‑oldali) kimenő HTTP‑kérés testreszabására valók,
+  nálunk viszont a proxy sima, változatlan OpenAI `chat/completions` kérést
+  kap, és minden Claude Code‑specifikus fordítást szerver‑oldalon, a
+  `bridge.py`‑ban végzünk. Ez tudatos döntés, nem hiányosság — most kódkommentben
+  is dokumentálva (`provider.py`).
+- `plugin.yaml` mezősorrendje/tartalma pontosan egyezik a doksi
+  `acme-inference` sablonjával (`name, kind, version, description, author`);
+  a verziószám idézőjelezését egységesítettem (`"0.1.0"`) mindhárom helyen
+  (checked‑in provider‑manifest, checked‑in general‑plugin‑manifest,
+  `install.py` generált verziók).
+- **„Distribution via pip" szakasz** a doksiban egy `hermes_agent.plugins`
+  entry pointot javasol modell‑provider terjesztéshez is
+  (`acme-inference = "acme_hermes_plugin:register"`). Ezt **szándékosan NEM
+  vezettük be újra** — a 10. pontban forrásból igazoltuk, hogy a
+  `_scan_entry_points()` a `kind`‑ot mindig `"standalone"`‑ra hagyja (nincs
+  forrás‑sniffelés, mint a könyvtár‑alapú manifestnél), tehát egy ilyen
+  entry point **opt‑in‑köteles és üres metaadatú** lenne — pont az a
+  probléma, amit a 10. pontban a general‑plugin fél kapcsán már kijavítottunk.
+  A könyvtár‑alapú út (bundled + user, mindkettő lefedve az
+  `install.py`/checked‑in shimekkel) a doksi „Discovery Mechanism" listáját
+  (bundled → user → legacy single‑file) teljesen és kollízió nélkül fedi.
+- README kiegészítve a doksi saját ellenőrző receptjével
+  (`hermes -z "hello" --provider hermes-claude-code -m sonnet`, `hermes doctor`)
+  és egy „ProviderProfile field reference" táblázattal.

@@ -17,6 +17,11 @@ PROVIDER_NAME = "hermes-claude-code"
 PROVIDER_ALIASES = ("claude-code-agent", "hermes_claude_code")
 DISPLAY_NAME = "Claude Code"
 DESCRIPTION = "Claude Code via local OpenAI-compatible Hermes bridge"
+# ProviderProfile.signup_url — "shown during first-run setup" per Hermes'
+# model-provider plugin docs. There's no web signup page (auth is `claude
+# login`, a CLI OAuth flow), so this points at our own install instructions
+# instead of a generic marketing page.
+SIGNUP_URL = "https://github.com/MrS4k4l/hermes-claude#install"
 # Env var the Hermes api-key auth layer reads for our placeholder credential.
 # Listed in the profile's ``env_vars`` so Hermes' auto-extend registers us.
 API_KEY_ENV_VAR = "HERMES_CLAUDE_CODE_API_KEY"

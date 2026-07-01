@@ -13,6 +13,7 @@ from hermes_claude_code.config import (
     LOCAL_API_KEY,
     PROVIDER_ALIASES,
     PROVIDER_NAME,
+    SIGNUP_URL,
     Config,
 )
 
@@ -32,6 +33,11 @@ def test_build_profile_fields():
     assert p.supports_health_check is True
     assert p.base_url == "http://127.0.0.1:40123/v1"
     assert tuple(p.fallback_models) == FALLBACK_MODELS
+    # Shown during first-run setup per Hermes' model-provider plugin docs;
+    # points at our own install instructions since auth is `claude login`,
+    # not a web signup page.
+    assert p.signup_url == SIGNUP_URL
+    assert p.signup_url
 
 
 def test_no_claude_code_alias_collision():
