@@ -14,7 +14,8 @@ directory layout each expects):
     ``hermes claude-code <status|start|stop|doctor>`` CLI commands, and
     exposes a ``/claude-code`` slash command. Its manifest's
     ``kind: standalone`` makes Hermes gate it behind
-    ``hermes plugins enable hermes-claude-code``.
+    ``hermes plugins enable hermes-claude-code`` — ``install.py`` flips this
+    automatically as part of ``install()``, so it's rarely a manual step.
 """
 
 from __future__ import annotations

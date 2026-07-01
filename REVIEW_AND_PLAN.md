@@ -644,3 +644,66 @@ valódi `hermes_constants.get_hermes_home()` **pontosan ugyanazt az útvonalat**
 adja vissza (`C:\Users\...\AppData\Local\hermes`). Új teszt:
 `tests/test_config.py` (4 eset: env‑var felülír, win32 LOCALAPPDATA‑val,
 win32 LOCALAPPDATA nélkül, nem‑win32).
+
+## 13. Miért NEM jó a Hermes dashboard „Telepítés GitHubról" installere ide
+
+A felhasználó a valódi Hermes web‑dashboardján (`/plugins` oldal) mutatott egy
+GUI dobozt („Telepítés GitHubról / Git URL‑ről", „Engedélyezés a telepítés
+után" kapcsolóval), és megkérdezte, hogy ezen keresztül lehet‑e telepíteni.
+Elolvastam a mögötte futó valódi kódot (`hermes_cli/plugins_cmd.py`,
+`_install_plugin_core`, ~1940 sor) — **ez a mechanizmus strukturálisan
+alkalmatlan a mi pluginunkra**, két okból, forrásból igazolva:
+
+1. **Mindig lapos célba telepít**: `plugins_dir = _plugins_dir()` = mindig
+   `$HERMES_HOME/plugins/<name>/`. Nincs benne semmi, ami a
+   `model-providers/` alkategóriát ismerné vagy oda irányítana. Ha a
+   `plugins/model-providers/hermes-claude-code` subdirt adnánk meg
+   azonosítóként, a fájlok **laposan** landolnának — a
+   `providers._discover_providers()` viszont *kizárólag* a
+   `plugins/model-providers/<name>/` útvonalat nézi (bundled + user), ezt a
+   lapos helyet sosem. A `hermes_cli.plugins.PluginManager` saját maga is
+   látná (hisz oda IS lapos scannel), a `plugin.yaml`‑ban deklarált
+   `kind: model-provider` miatt viszont **explicit kihagyná** („handled by
+   providers/ discovery" — csak épp az a másik rendszer sosem néz oda). Az
+   eredmény: a Bővítmények lista „telepítve, engedélyezve"‑t mutatna, miközben
+   a „Claude Code" **sosem jelenne meg** a `hermes model`‑ben.
+2. **Sosem futtat `pip install`‑t** — `_install_plugin_core` tiszta `git
+   clone --depth 1` + `shutil.move`, semmilyen csomagtelepítési lépés nincs
+   benne. A `httpx`/`fastapi`/`uvicorn`/`claude-agent-sdk` sosem kerülne
+   telepítésre, a shim `ModuleNotFoundError`‑ral elszállna.
+
+Mindkét pont **Hermes saját installerének korlátja**, nem a mi
+mappaszerkezetünké — semmilyen átrendezéssel nem javítható a mi oldalunkról.
+Megfontoltam egy „nulla‑függőségű lite" átírást is (csak `claude` CLI
+subprocess + Python stdlib `http.server`, `claude-agent-sdk`/FastAPI/uvicorn
+elhagyásával), ami tényleg GUI‑telepíthetővé tenné — a felhasználó a gazdag
+verzió (streaming, natív tool‑hidalás, vízió) megtartása mellett döntött, egy
+külön `pip install` lépés elfogadásával.
+
+**Ehelyett**: a `README.md`‑ben új „Why not 'Install from GitHub'?" szakasz
+magyarázza el ezt, forrásra hivatkozva, hogy senki ne próbálja meg ezt az utat
+és ne csodálkozzon a néma hibán.
+
+### Kompenzáció: automatikus engedélyezés telepítéskor
+
+Mivel a `pip install` lépés úgyis elkerülhetetlen, a hátralévő kézi lépések
+számát minimalizáltuk: az `install.py` mostantól **automatikusan bekapcsolja**
+az általános plugint a `config.yaml`‑ban, a valódi Hermes saját
+`hermes_cli.config.load_config`/`save_config` függvényeit újrahasznosítva —
+pontosan azt teszi, amit a `hermes plugins enable hermes-claude-code` parancs
+is tenne, nem kézi YAML‑szerkesztéssel. Ez `False`‑ra esik vissza (és a
+kézi parancsot jelenti következő lépésként), ha a `hermes_cli` nem elérhető
+(standalone install) vagy a config Nix‑managed (visszautasítja a külső írást).
+
+Élőben validálva egy előre feltöltött, más beállításokat (modell‑provider,
+más engedélyezett plugin) tartalmazó ideiglenes `config.yaml` ellen: az
+`install()` hozzáadta a `hermes-claude-code`‑ot az `enabled` listához,
+**semmilyen más beállítást nem érintett**, és ismételt futtatásra nem
+duplikált. Egy teljes, tiszta `install()`‑hívás után (kézi lépés nélkül) a
+friss `PluginManager` már `enabled=True`‑t mutat, a hook és a `/claude-code`
+parancs regisztrálva van, ÉS a modell‑provider is felfedezve — mindezt egyetlen
+függvényhívásból.
+
+Új tesztek: `tests/test_install.py` (`_auto_enable_general_plugin`
+dependency‑injectált load_config/save_config‑gal — hozzáad, meglévő listát
+megőriz, már‑engedélyezettnél nem ír feleslegesen, hibára `False`‑t ad).

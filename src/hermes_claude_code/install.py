@@ -14,14 +14,27 @@ Hermes has two separate plugin subsystems that both apply to this package
   ``PluginContext``. This wires the ``on_session_start`` proxy-autostart
   hook, the ``/claude-code`` slash command, and the ``hermes claude-code``
   CLI subcommand. Its manifest declares ``kind: standalone``, which Hermes
-  gates behind an explicit ``hermes plugins enable hermes-claude-code`` —
-  every ``kind: standalone`` plugin is opt-in by design (untrusted code),
-  directory-based or pip-entry-point alike; there is no way around this from
-  our side, so ``install()`` prints the command as the last step.
+  gates behind an explicit opt-in — every ``kind: standalone`` plugin is,
+  directory-based or pip-entry-point alike; there is no way around the gate
+  itself. What we *can* do from our side is flip it automatically: ``install()``
+  reuses Hermes' own ``hermes_cli.config.load_config``/``save_config`` (the
+  exact functions ``hermes plugins enable`` itself calls) to add
+  ``hermes-claude-code`` to ``plugins.enabled`` in ``config.yaml``, so the
+  manual enable step is skipped whenever that's possible. Best-effort: falls
+  back to reporting the manual command if ``hermes_cli`` isn't importable
+  (standalone install) or the config is Nix/managed (refuses external writes).
 
 Both directories are written by ``install()`` rather than asking the user to
 copy files by hand; the model-provider one works immediately, the general
-one lights up once enabled.
+one lights up once enabled (automatically, or manually as a fallback).
+
+NB: Hermes' own "Install from GitHub" plugin installer (CLI ``hermes plugins
+install`` / the dashboard's git-install box) is NOT a substitute for this.
+Verified against ``hermes_cli/plugins_cmd.py``: it always clones into the flat
+``~/.hermes/plugins/<name>/``, never into ``plugins/model-providers/<name>/``,
+and never runs ``pip install``. Using it here would silently fail to register
+the model provider and crash on missing dependencies. Always use
+``pip install`` + this module's ``install()`` instead.
 """
 
 from __future__ import annotations
@@ -94,8 +107,59 @@ def general_plugin_dir(hermes_home_override: str | Path | None = None) -> Path:
     return home / "plugins" / PROVIDER_NAME
 
 
-def install(hermes_home_override: str | Path | None = None) -> dict:
-    """Write both discovery directories; return a small status dict."""
+def _auto_enable_general_plugin(*, load_config=None, save_config=None) -> bool:
+    """Best-effort: add ``PROVIDER_NAME`` to config.yaml's ``plugins.enabled``.
+
+    Mirrors exactly what ``hermes plugins enable hermes-claude-code`` does —
+    reuses Hermes' own ``load_config``/``save_config`` (the real functions
+    that command calls) rather than hand-rolling YAML edits, so this is no
+    riskier than a user running that command themselves. Returns ``True`` iff
+    the plugin ends up enabled (already was, or was just added); ``False`` if
+    ``hermes_cli`` isn't importable (standalone/non-Hermes environment) or the
+    config refused the write (e.g. a Nix-managed install) — the caller should
+    fall back to telling the user to run the command by hand.
+
+    ``load_config``/``save_config`` are injectable for testing; production
+    callers leave them unset and get the real ``hermes_cli.config`` functions.
+    """
+    if load_config is None or save_config is None:
+        try:
+            from hermes_cli import config as _hermes_config
+        except Exception:
+            return False
+        load_config = load_config or _hermes_config.load_config
+        save_config = save_config or _hermes_config.save_config
+    try:
+        config = load_config()
+        plugins_cfg = config.get("plugins")
+        if not isinstance(plugins_cfg, dict):
+            plugins_cfg = {}
+            config["plugins"] = plugins_cfg
+        enabled = plugins_cfg.get("enabled")
+        enabled_set = set(enabled) if isinstance(enabled, list) else set()
+        if PROVIDER_NAME in enabled_set:
+            return True
+        enabled_set.add(PROVIDER_NAME)
+        plugins_cfg["enabled"] = sorted(enabled_set)
+        save_config(config)
+        return True
+    except Exception:
+        return False
+
+
+def install(
+    hermes_home_override: str | Path | None = None, *, auto_enable: bool = True
+) -> dict:
+    """Write both discovery directories; return a small status dict.
+
+    With ``auto_enable`` (default), also tries to flip the general plugin's
+    opt-in gate on — see :func:`_auto_enable_general_plugin`. Skipped when
+    ``hermes_home_override`` is given: that targets an alternate directory,
+    but Hermes' own ``load_config``/``save_config`` always operate on the
+    real, ambient ``$HERMES_HOME`` — writing there would target the wrong
+    installation (this is also why every test passes an override and never
+    exercises a real config.yaml write).
+    """
     provider_dest = provider_plugin_dir(hermes_home_override)
     provider_dest.mkdir(parents=True, exist_ok=True)
     (provider_dest / "__init__.py").write_text(_PROVIDER_INIT_PY, encoding="utf-8")
@@ -106,12 +170,16 @@ def install(hermes_home_override: str | Path | None = None) -> dict:
     (general_dest / "__init__.py").write_text(_GENERAL_INIT_PY, encoding="utf-8")
     (general_dest / "plugin.yaml").write_text(_GENERAL_PLUGIN_YAML, encoding="utf-8")
 
-    return {
+    result = {
         "status": "installed",
         "provider_path": str(provider_dest),
         "general_path": str(general_dest),
-        "next_step": f"hermes plugins enable {PROVIDER_NAME}",
     }
+    enabled = auto_enable and hermes_home_override is None and _auto_enable_general_plugin()
+    result["general_plugin_enabled"] = bool(enabled)
+    if not enabled:
+        result["next_step"] = f"hermes plugins enable {PROVIDER_NAME}"
+    return result
 
 
 def uninstall(hermes_home_override: str | Path | None = None) -> dict:
