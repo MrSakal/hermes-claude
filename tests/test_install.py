@@ -6,9 +6,9 @@ from hermes_claude_code import install
 from hermes_claude_code.config import PROVIDER_NAME
 
 # auto_enable=False everywhere below: these tests only care about the file
-# writes, and whether hermes_cli happens to be importable in the environment
-# running pytest shouldn't affect their outcome. Auto-enable itself is
-# unit-tested separately via dependency injection.
+# writes, and whether the real `hermes` binary happens to be on PATH in the
+# environment running pytest shouldn't affect their outcome. Auto-enable
+# itself is unit-tested separately via dependency injection.
 
 
 def test_install_writes_provider_discovery_dir(tmp_path, monkeypatch):
@@ -54,9 +54,9 @@ def test_install_with_auto_enable_disabled_reports_manual_step(tmp_path, monkeyp
 
 
 def test_install_skips_auto_enable_with_explicit_home_override(tmp_path):
-    # hermes_cli.config always targets the real, ambient $HERMES_HOME; an
+    # The real `hermes` CLI always targets the real, ambient $HERMES_HOME; an
     # explicit override parameter targets somewhere else, so auto-enable
-    # must not run even if auto_enable=True (would write to the wrong place).
+    # must not run even if auto_enable=True (would enable in the wrong place).
     result = install.install(str(tmp_path), auto_enable=True)
     assert result["general_plugin_enabled"] is False
     assert result["next_step"] == f"hermes plugins enable {PROVIDER_NAME}"
@@ -81,49 +81,67 @@ def test_uninstall_removes_both_dirs(tmp_path, monkeypatch):
     assert install.uninstall()["status"] == "not-installed"
 
 
-# -- _auto_enable_general_plugin (dependency-injected, no real hermes_cli) -- #
-def test_auto_enable_adds_plugin_and_preserves_other_config():
-    saved = {}
+# -- _auto_enable_general_plugin (dependency-injected which/run) ----------- #
+class _FakeCompletedProcess:
+    def __init__(self, returncode: int):
+        self.returncode = returncode
+
+
+def test_auto_enable_runs_the_documented_cli_command():
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _FakeCompletedProcess(0)
+
     ok = install._auto_enable_general_plugin(
-        load_config=lambda: {"model": {"provider": "openai-api"}},
-        save_config=saved.update,
+        which=lambda name: "/usr/bin/hermes" if name == "hermes" else None,
+        run=fake_run,
     )
     assert ok is True
-    assert saved["plugins"]["enabled"] == [PROVIDER_NAME]
-    assert saved["model"]["provider"] == "openai-api"  # untouched
+    # The exact documented command, not an internal API call. --no-allow-
+    # tool-override is required: without it, `hermes plugins enable` prompts
+    # interactively for any non-bundled plugin and hangs forever on a
+    # subprocess with no TTY (confirmed live -- it ran to the 30s timeout).
+    assert calls == [
+        ["/usr/bin/hermes", "plugins", "enable", PROVIDER_NAME, "--no-allow-tool-override"]
+    ]
 
 
-def test_auto_enable_merges_with_existing_enabled_list():
-    saved = {}
+def test_auto_enable_false_when_hermes_not_on_path():
+    ok = install._auto_enable_general_plugin(which=lambda name: None)
+    assert ok is False
+
+
+def test_auto_enable_false_on_nonzero_exit():
     ok = install._auto_enable_general_plugin(
-        load_config=lambda: {"plugins": {"enabled": ["other-plugin"]}},
-        save_config=saved.update,
-    )
-    assert ok is True
-    assert sorted(saved["plugins"]["enabled"]) == sorted(["other-plugin", PROVIDER_NAME])
-
-
-def test_auto_enable_is_a_noop_write_when_already_enabled():
-    save_calls = []
-    ok = install._auto_enable_general_plugin(
-        load_config=lambda: {"plugins": {"enabled": [PROVIDER_NAME]}},
-        save_config=lambda cfg: save_calls.append(cfg),
-    )
-    assert ok is True
-    assert save_calls == []  # already enabled -> no unnecessary write
-
-
-def test_auto_enable_false_on_save_failure():
-    def boom(cfg):
-        raise RuntimeError("config is Nix-managed")
-
-    ok = install._auto_enable_general_plugin(
-        load_config=lambda: {}, save_config=boom
+        which=lambda name: "/usr/bin/hermes",
+        run=lambda cmd, **kw: _FakeCompletedProcess(1),
     )
     assert ok is False
 
 
-def test_auto_enable_false_without_hermes_cli(monkeypatch):
-    # hermes_cli isn't installed in this test environment, so the real
-    # (uninjected) path must fail closed rather than raise.
+def test_auto_enable_false_when_command_raises():
+    def boom(cmd, **kwargs):
+        raise OSError("timed out")
+
+    ok = install._auto_enable_general_plugin(
+        which=lambda name: "/usr/bin/hermes", run=boom
+    )
+    assert ok is False
+
+
+def test_auto_enable_uninjected_default_uses_real_which_and_run(monkeypatch):
+    # Verify the *uninjected* path wires up real shutil.which/subprocess.run
+    # (not that it finds a real hermes -- this machine's PATH does include a
+    # real `hermes`, and actually invoking it here would mutate the user's
+    # live config.yaml). Patch the real functions at their source so no
+    # subprocess is ever spawned.
+    import shutil
+    import subprocess
+
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(
+        AssertionError("must not be called when which() returns None")
+    ))
     assert install._auto_enable_general_plugin() is False
