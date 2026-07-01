@@ -17,13 +17,6 @@ sdk = [
     "claude-agent-sdk>=0.2.110",
 ]
 
-[project.entry-points."hermes_agent.plugins"]
-# Module target (not ":register"): Hermes' general-plugin loader resolves the
-# entry point to a module and calls its register(). Provider discovery itself is
-# directory-based (plugins/model-providers/<name>/), so this entry point is a
-# secondary path — kept as a module to match the loader convention that works.
-hermes-claude-code = "hermes_claude_code.plugin"
-
 [project.scripts]
 hermes-claude-code = "hermes_claude_code.cli:main"
 hermes-claude-code-proxy = "hermes_claude_code.proxy:main"
