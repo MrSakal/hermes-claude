@@ -21,3 +21,8 @@ Then make this provider discoverable in one of two ways:
 
 Authenticate Claude Code with your **subscription** (`claude login`, OAuth) —
 no API key needed. See the repository `README.md` for details.
+
+`plugin.yaml` here is a human-readable manifest only — Hermes' discovery never
+parses it, it only imports `__init__.py`. Its fields are kept in sync with the
+copy `hermes-claude-code install` writes into `$HERMES_HOME` by
+`tests/test_plugin_manifest_consistency.py`; update both together.

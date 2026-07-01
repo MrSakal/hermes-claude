@@ -15,9 +15,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .config import PROVIDER_NAME, hermes_home
+from .config import DESCRIPTION, PROVIDER_NAME, hermes_home
 from . import __version__
 
+# Single source of truth for both discovery-shim locations: this is what gets
+# written into $HERMES_HOME, and its fields (name/kind/version/description)
+# must match plugins/model-providers/hermes-claude-code/plugin.yaml — the
+# checked-in copy used for the "vendor-drop this repo into a hermes-agent
+# checkout's bundled plugins dir" scenario. Nothing in Hermes parses
+# plugin.yaml at runtime (discovery only imports __init__.py), so a test
+# (tests/test_plugin_manifest_consistency.py) is what keeps the two in sync —
+# update both together when either changes.
 _INIT_PY = '''\
 """Auto-generated Hermes model-provider discovery shim for hermes-claude-code.
 
@@ -33,7 +41,7 @@ _PLUGIN_YAML = f'''\
 name: {PROVIDER_NAME}
 kind: model-provider
 version: {__version__}
-description: "Claude Code as a Hermes model provider via a local OpenAI-compatible bridge."
+description: "{DESCRIPTION}"
 author: Nous Research
 '''
 

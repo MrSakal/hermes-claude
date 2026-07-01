@@ -416,6 +416,23 @@ mellett készült.
   Tesztelve (`tests/test_request_options.py`,
   `tests/test_tool_choice.py::test_build_options_none_exposes_no_mcp_server`).
 
+- ✅ **Mappa/manifest rendrakás (repo hygiene).** A repóban három
+  `plugin.yaml`‑szerű dolog volt: a gyökér `plugin.yaml`, a checked‑in
+  `plugins/model-providers/hermes-claude-code/plugin.yaml`, és az
+  `install.py`‑generált verzió. A gyökér‑szintű **törölve** — sem a valódi
+  Hermes discovery (csak `__init__.py`‑t importál, YAML‑t sosem olvas be, ezt
+  a helyi forrásban ellenőriztem: `grep -rl plugin.yaml` a telepített
+  hermes‑agent‑ben nulla találat), sem semmilyen packaging/teszt nem
+  hivatkozott rá, és a tartalma **elavult/félrevezető** volt (még
+  `ANTHROPIC_API_KEY`‑t javasolt env‑változóként, holott pont azt akadályozzuk
+  meg, hogy ez a backend felé szivárogjon). A maradék két másolat (checked‑in
+  vs. `$HERMES_HOME`‑ba generált — ezek jogosan különböznek: az egyik a
+  „vendor‑drop a hermes‑agent saját bundled mappájába" utat szolgálja `sys.path`
+  fallback‑kal, a másik a dokumentált pip‑install utat) most **egy közös
+  leírás‑konstansból** (`config.DESCRIPTION`) építkezik, és egy új
+  drift‑guard teszt (`tests/test_plugin_manifest_consistency.py`) hibát dob,
+  ha a name/kind/version/description mezők a kettő között szétcsúsznak.
+
 **Továbbra is elhalasztva (alacsony prioritás):**
 - ⏳ Modellkatalógus id‑alapúra (most display‑nevek + `MODEL_ID_ALIASES`, ami
   **működik**).
