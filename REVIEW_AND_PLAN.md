@@ -680,30 +680,97 @@ elhagyásával), ami tényleg GUI‑telepíthetővé tenné — a felhasználó 
 verzió (streaming, natív tool‑hidalás, vízió) megtartása mellett döntött, egy
 külön `pip install` lépés elfogadásával.
 
-**Ehelyett**: a `README.md`‑ben új „Why not 'Install from GitHub'?" szakasz
-magyarázza el ezt, forrásra hivatkozva, hogy senki ne próbálja meg ezt az utat
-és ne csodálkozzon a néma hibán.
+**Ehelyett**: az `AGENTS.md`‑ben (l. 14. pont) egy „Do NOT" szakasz
+magyarázza el ezt, forrásra hivatkozva, hogy senki (ember vagy AI-ügynök) ne
+próbálja meg ezt az utat és ne csodálkozzon a néma hibán.
 
 ### Kompenzáció: automatikus engedélyezés telepítéskor
 
 Mivel a `pip install` lépés úgyis elkerülhetetlen, a hátralévő kézi lépések
 számát minimalizáltuk: az `install.py` mostantól **automatikusan bekapcsolja**
-az általános plugint a `config.yaml`‑ban, a valódi Hermes saját
-`hermes_cli.config.load_config`/`save_config` függvényeit újrahasznosítva —
-pontosan azt teszi, amit a `hermes plugins enable hermes-claude-code` parancs
-is tenne, nem kézi YAML‑szerkesztéssel. Ez `False`‑ra esik vissza (és a
-kézi parancsot jelenti következő lépésként), ha a `hermes_cli` nem elérhető
-(standalone install) vagy a config Nix‑managed (visszautasítja a külső írást).
+az általános plugint. Első nekifutásra ez a Hermes saját, belső
+`hermes_cli.config.load_config`/`save_config` függvényeinek újrahasznosításával
+történt — ezt a felhasználó explicit visszautasította (l. 14. pont: „a
+dokumentációjukhoz tartsuk magunkat, az a legbiztosabb"), és **a dokumentált
+CLI‑parancsra** (`hermes plugins enable <name>`) váltottunk subprocess‑ből
+hívva, ami stabilabb szerződés egy belső, nem‑dokumentált API‑nál.
 
-Élőben validálva egy előre feltöltött, más beállításokat (modell‑provider,
-más engedélyezett plugin) tartalmazó ideiglenes `config.yaml` ellen: az
-`install()` hozzáadta a `hermes-claude-code`‑ot az `enabled` listához,
-**semmilyen más beállítást nem érintett**, és ismételt futtatásra nem
-duplikált. Egy teljes, tiszta `install()`‑hívás után (kézi lépés nélkül) a
-friss `PluginManager` már `enabled=True`‑t mutat, a hook és a `/claude-code`
-parancs regisztrálva van, ÉS a modell‑provider is felfedezve — mindezt egyetlen
-függvényhívásból.
+Élőben validálva: a subprocess‑hívás egy előre feltöltött, más beállításokat
+tartalmazó ideiglenes `config.yaml` ellen helyesen hozzáadta a
+`hermes-claude-code`‑ot az `enabled` listához, más beállítást nem érintett,
+és ismétlésre nem duplikált. Egy teljes, tiszta `install()`‑hívás után (kézi
+lépés nélkül) a friss `PluginManager` már `enabled=True`‑t mutat, a hook és a
+`/claude-code` parancs regisztrálva van, ÉS a modell‑provider is felfedezve —
+mindezt egyetlen függvényhívásból. Lásd a 14. pontot a CLI‑váltás közben
+talált valódi hibáért (a hiányzó `--no-allow-tool-override` miatti lefagyás).
 
-Új tesztek: `tests/test_install.py` (`_auto_enable_general_plugin`
-dependency‑injectált load_config/save_config‑gal — hozzáad, meglévő listát
-megőriz, már‑engedélyezettnél nem ír feleslegesen, hibára `False`‑t ad).
+Tesztek: `tests/test_install.py` (`_auto_enable_general_plugin`
+dependency‑injectált `which`/`run`‑nal — a pontos dokumentált parancsot
+hívja‑e, `PATH`‑on‑nincs‑hermes eset, nemnulla exit code, kivétel).
+
+## 14. Felhasználói visszajelzés: dokumentált API előny, auth‑tisztázás, README‑szétválasztás
+
+Három kérés érkezett a 13. pont munkája után:
+
+1. **„Tartsuk magunkat a dokumentációjukhoz, az a legbiztosabb."** — A 13.
+   pontban leírt `_auto_enable_general_plugin` első verziója a Hermes
+   **belső**, nem‑dokumentált `hermes_cli.config.load_config`/`save_config`
+   függvényeit hívta közvetlenül. Ez működött (élőben validálva), de
+   instabilabb szerződés, mint egy dokumentált CLI‑parancs — bármikor
+   megváltozhat a Hermes egy jövőbeli verziójában, tesztelés/figyelmeztetés
+   nélkül. **Váltás**: `subprocess.run([hermes_exe, "plugins", "enable",
+   PROVIDER_NAME, "--no-allow-tool-override"])` — a Hermes saját, dokumentált
+   „Plugin Management Commands" parancsa.
+
+   **Eközben talált valódi hiba**: a `--no-allow-tool-override` flag nélkül a
+   `hermes plugins enable` **lefagyott / 30 másodperces timeoutba futott**.
+   Forrásból kiderült miért: `cmd_enable` minden nem‑bundled pluginnál
+   interaktívan rákérdez a „tool override" jogosultságra
+   (`_resolve_tool_override_grant`, `allow_tool_override=None` esetén
+   `input()`‑et hív), és subprocess‑ből (nincs TTY, `capture_output=True`)
+   ez örökre blokkol. A mi pluginunk **sosem regisztrál toolt**
+   (`ctx.register_tool` sehol nincs hívva), tehát az elutasítás funkcionálisan
+   semleges — a `--no-allow-tool-override` flag hozzáadása megoldotta,
+   élőben megerősítve: 1.4 másodperc alatt visszatér, `returncode: 0`.
+
+   **Teszt‑biztonsági közeli hiba**: az új subprocess‑alapú teszt egyik
+   első verziója a VALÓDI `shutil.which`/`subprocess.run`‑t használta volna
+   (nem injektálva) — és kiderült, hogy ezen a gépen a `hermes` bináris
+   **ténylegesen a PATH‑on van** (`which hermes` megtalálja). Ha lefut, ez a
+   teszt a felhasználó **éles** `config.yaml`‑ját módosította volna. Még
+   futtatás előtt észrevettem és javítottam — a tesztet explicit
+   `monkeypatch.setattr(shutil, "which", ...)`/`subprocess.run`‑nal védtem,
+   AssertionError‑ral, ha mégis meghívná a valódit. Ellenőrizve a valódi
+   `config.yaml` módosítási idejével: érintetlen maradt (utolsó módosítás a
+   mai munka előttről).
+
+2. **„Csak `claude login` kell, API‑kulcsot nem szeretnék ebben a
+   pluginban."** — A README auth‑szakasza korábban a `claude
+   setup-token`/`CLAUDE_CODE_OAUTH_TOKEN` headless utat egyenrangúan mutatta
+   a `claude login`‑nal a fő telepítési folyamatban. Ez összemosódhat az
+   „API‑kulcs" fogalmával, holott ez ugyanaz az OAuth‑folyam, csak
+   non‑interaktív változatban. Az új `README.md` fő útja **kizárólag**
+   `claude login`; a headless/szerver változat átkerült az `AGENTS.md`‑be,
+   mint másodlagos, egyértelműen „még mindig a te előfizetésed, nem
+   API‑kulcs" felirattal ellátott opció.
+
+3. **„A README‑t úgy szerkeszd, hogy az AI is értse, hogyan kell telepíteni,
+   plusz legyen egy sima README is."** — A `README.md` (256 sor, sűrű
+   technikai táblázatokkal, forrás‑idézetekkel) helyett:
+   - **`README.md`** — rövid, sima, ember‑barát: mi ez, 4 lépéses telepítés,
+     használat, konfiguráció‑táblázat, fejlesztés. ~90 sor.
+   - **`AGENTS.md`** (új) — explicit, procedurális, AI‑ügynök számára
+     írt telepítési/ellenőrzési/hibaelhárítási útmutató: pontos parancsok,
+     „Check:"/„If it fails:" minden lépés után, „Do NOT" szakasz (GitHub‑
+     install GUI, `--no-allow-tool-override` hiánya, `ANTHROPIC_API_KEY`),
+     hibaelhárító táblázat, uninstall. Ez viszi tovább a korábbi README
+     „Why not Install from GitHub?" és „Two plugin subsystems" mélytechnikai
+     tartalmát, immár a hibaelhárítás kontextusában.
+   - **`REVIEW_AND_PLAN.md`** — változatlanul az építkezés közbeni
+     mérnöki napló/audit‑trail (ez a fájl).
+
+   Frissítve a kereszthivatkozások is: a `plugins/model-providers/
+   hermes-claude-code/README.md` és `plugins/hermes-claude-code/README.md`
+   most az `AGENTS.md`‑re mutat a törölt README‑szakaszok helyett, és az
+   utóbbi már a dokumentált CLI‑parancsot írja le a `load_config`/
+   `save_config` helyett (elavult volt a 13. pont utáni váltás óta).

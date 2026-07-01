@@ -16,15 +16,18 @@ independently of this one.
 Because `plugin.yaml` declares `kind: standalone`, Hermes gates it behind an
 explicit opt-in — every `standalone` plugin is, directory-based or
 pip-entry-point alike. `hermes-claude-code install` (below) flips this on
-automatically by writing `plugins.enabled` in `config.yaml` via Hermes' own
-`load_config`/`save_config` — the exact mechanism behind:
+automatically by shelling out to Hermes' own **documented** CLI command
+(not an internal API):
 
 ```bash
-hermes plugins enable hermes-claude-code
+hermes plugins enable hermes-claude-code --no-allow-tool-override
 ```
 
-...so you only need to run that by hand if auto-enable couldn't (see the
-main README's Install section for when that happens).
+(`--no-allow-tool-override` is required — without it this command prompts
+interactively and hangs when run non-interactively; this plugin never
+registers a tool, so declining that grant has no effect either way.) You only
+need to run this by hand if auto-enable couldn't — see `AGENTS.md` at the
+repository root for when that happens and what to do about it.
 
 Install this directory (and the model-provider one) with:
 

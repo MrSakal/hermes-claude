@@ -16,8 +16,8 @@ pip install 'hermes-claude-code[sdk]'
 Then make this provider discoverable, either by copying this directory to
 `$HERMES_HOME/plugins/model-providers/hermes-claude-code/` by hand, or by
 running `hermes-claude-code install` (does the copy for you, and also sets up
-the sibling `../../hermes-claude-code/` general-plugin directory — see the
-repository `README.md`'s "Two plugin subsystems" section).
+the sibling `../../hermes-claude-code/` general-plugin directory — see
+`AGENTS.md` at the repository root for the full, step-by-step rationale).
 
 Authenticate Claude Code with your **subscription** (`claude login`, OAuth) —
 no API key needed. See the repository `README.md` for details.
