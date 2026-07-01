@@ -67,6 +67,22 @@ def test_sdk_options_enable_visible_thinking_for_reasoning_effort():
     assert options.thinking == {"type": "adaptive", "display": "summarized"}
 
 
+def test_sdk_options_disable_native_tools_when_no_tools_requested():
+    # A plain chat-completions call (no `tools` in the payload) must run
+    # Claude Code as a pure text-in/text-out model: no Hermes MCP bridge, and
+    # no fallback to Claude Code's own native tools (Bash/Edit/WebFetch/...)
+    # either — those would run unattended (no permission_mode / can_use_tool
+    # is set for this path) on whatever host runs the proxy.
+    conv = prepare_conversation(
+        {"messages": [{"role": "user", "content": "hi"}]}, Config()
+    )
+
+    options, _ = ClaudeBridge(Config())._build_options(conv)
+
+    assert options.tools == []
+    assert not options.mcp_servers
+
+
 def test_sdk_options_keep_hermes_tools_host_delegated():
     conv = prepare_conversation(
         {

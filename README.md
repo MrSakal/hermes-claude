@@ -1,98 +1,85 @@
 # Hermes Claude Code
 
-A single Hermes plugin that appears as a model provider — **Hermes Claude
-Code** — and routes Hermes model calls through Claude Code via the
-[`claude-agent-sdk`](https://pypi.org/project/claude-agent-sdk/), with a safe
-fallback to the `claude` CLI.
+Adds **Claude Code** as a model provider in [Hermes](https://hermes-agent.nousresearch.com/) — pick it in `hermes model` like any other provider, and your prompts run through Claude Code (via the `claude-agent-sdk`, with the `claude` CLI as a fallback).
 
-It works by running a small **local, OpenAI-compatible proxy** (bound to
-`127.0.0.1` only). Hermes talks to the proxy with the standard Chat
-Completions API; the proxy translates each request into a Claude Code call and
-returns OpenAI-shaped responses.
+It works by running a small local proxy that Hermes talks to like a normal OpenAI-compatible API; the proxy translates each request into a real Claude Code call and returns the response in the shape Hermes expects.
+
+**Auth is just `claude login`.** No Anthropic API key is ever needed — your Claude Pro/Max/Team subscription is what runs it, and the plugin never bills at API rates.
 
 ## Install
 
 ```bash
-pip install hermes-claude-code          # core
-pip install 'hermes-claude-code[sdk]'   # + claude-agent-sdk backend
-hermes plugins enable hermes-claude-code
-hermes claude-code doctor
-hermes model
+# 1. Install the package into the SAME Python environment that runs Hermes
+pip install "git+https://github.com/MrS4k4l/hermes-claude.git#egg=hermes-claude-code[sdk]"
+
+# 2. Register it with Hermes (writes its plugin files, enables it)
+hermes-claude-code install
+
+# 3. Log in with your Claude subscription
+claude login
+
+# 4. Check it worked
+hermes-claude-code doctor
+hermes model        # "Claude Code" should be in the list
 ```
 
-`doctor` reports exactly what's missing (SDK, `claude` CLI, auth, or proxy).
-Authenticate Claude Code with either `ANTHROPIC_API_KEY` or `claude` login.
+That's the whole install — no config.yaml editing, no API key, no extra manual
+steps.
 
-## Configure Hermes to use it
+Want an AI coding agent to run this install for you? Point it at
+**[AGENTS.md](AGENTS.md)** — it has exact commands, checks, and troubleshooting
+written for that.
+
+## Using it
 
 ```yaml
+# ~/.hermes/config.yaml
 model:
   provider: hermes-claude-code
   default: sonnet
 ```
 
-## Endpoints (local proxy)
+Or just pick it interactively with `hermes model`.
 
-| Method | Path | Purpose |
-| ------ | ---- | ------- |
-| GET  | `/health`              | `{status, version, sdk_available}` |
-| GET  | `/v1/models`           | OpenAI-compatible model list |
-| POST | `/v1/chat/completions` | Non-streaming and streaming (SSE) completions |
+## Managing the proxy
 
 ```bash
-curl http://127.0.0.1:35345/v1/models
-curl http://127.0.0.1:35345/v1/chat/completions \
-  -H 'content-type: application/json' \
-  -d '{"model":"sonnet","messages":[{"role":"user","content":"Say pong only"}]}'
+hermes-claude-code status
+hermes-claude-code start
+hermes-claude-code stop
+hermes-claude-code doctor --live   # also sends a real test message
 ```
 
-## Management commands
+The same commands also work as `hermes claude-code ...` and, inside a Hermes
+session, as `/claude-code`.
 
-```bash
-hermes claude-code status        # proxy status + base_url
-hermes claude-code start         # start the local proxy
-hermes claude-code stop          # stop it
-hermes claude-code doctor --live # diagnose + send a trivial live completion
-```
+## Configuration
 
-The same actions are available in-session as `/claude-code status|start|stop|doctor`.
-The proxy is also started automatically on session start.
+Everything has a sane default — you only need these if you want to change
+something:
 
-## Configuration (environment)
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `HERMES_CLAUDE_CODE_PORT` | `35345` | Local proxy port |
+| `HERMES_CLAUDE_CODE_MODE` | `strict` | `strict`: Hermes stays in control of tool calls. `agentic`: Claude Code runs tools itself. |
+| `HERMES_CLAUDE_CODE_CWD` | _(none)_ | Working directory Claude Code operates in |
+| `HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION` | `0` | Set to `1` to force subscription use even if `ANTHROPIC_API_KEY` happens to be set somewhere in the environment |
 
-| Variable | Default | Meaning |
-| -------- | ------- | ------- |
-| `HERMES_CLAUDE_CODE_HOST` | `127.0.0.1` | Proxy bind host (localhost only by design) |
-| `HERMES_CLAUDE_CODE_PORT` | `35345` | Proxy port |
-| `HERMES_CLAUDE_CODE_MODE` | `strict` | `strict` surfaces tool calls back to Hermes; `agentic` lets Claude Code run tools internally |
-| `HERMES_CLAUDE_CODE_CWD` | _(unset)_ | Working directory for Claude Code |
-| `HERMES_CLAUDE_CODE_TIMEOUT` | `600` | Per-request timeout (seconds) |
-
-## Tool calling (strict mode)
-
-In the default **strict** mode the proxy exposes Hermes' `tools` to Claude Code
-through an in-process SDK MCP server, but converts any tool-use intent back
-into OpenAI `tool_calls` so **Hermes stays the executor**. When Hermes replays
-the `tool` result message, the proxy continues the conversation. This keeps
-Hermes' tool semantics intact rather than letting Claude Code run tools opaquely.
+⚠️ **Don't set `ANTHROPIC_API_KEY` anywhere near this plugin.** If it's set,
+Claude Code uses it instead of your subscription and bills at API rates.
+`hermes-claude-code doctor` warns you if it finds one.
 
 ## Development
 
 ```bash
 uv sync --extra sdk
-uv run python -m py_compile src/hermes_claude_code/*.py
-uv run pytest -q
+uv run pytest
 ```
 
-## Architecture
+## More detail
 
-```
-Hermes model picker ──▶ ProviderProfile "hermes-claude-code"
-                               │  base_url = http://127.0.0.1:35345/v1
-                               ▼
-                       local OpenAI-compatible proxy (FastAPI)
-                               │  /v1/chat/completions
-                               ▼
-                       ClaudeBridge ──▶ claude-agent-sdk.query(...)
-                               └─fallback─▶ `claude -p --output-format json`
-```
+- **[AGENTS.md](AGENTS.md)** — step-by-step install/verify/troubleshoot guide
+  written for an AI agent to follow (also useful for a human who wants that
+  level of detail, e.g. headless/server installs).
+- **[REVIEW_AND_PLAN.md](REVIEW_AND_PLAN.md)** — engineering notes on what was
+  verified against Hermes' real source and why each design choice was made.

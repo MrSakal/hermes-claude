@@ -4,33 +4,18 @@ from __future__ import annotations
 
 import httpx
 
-from dataclasses import dataclass, field
-
 from hermes_claude_code import provider
 from hermes_claude_code.config import (
+    API_KEY_ENV_VAR,
     BASE_URL_ENV_VAR,
     DISPLAY_NAME,
     FALLBACK_MODELS,
+    LOCAL_API_KEY,
     PROVIDER_ALIASES,
     PROVIDER_NAME,
+    SIGNUP_URL,
     Config,
 )
-
-
-@dataclass
-class _FakeProviderConfig:
-    """Mirrors hermes_cli.auth.ProviderConfig fields used here."""
-
-    id: str
-    name: str
-    auth_type: str
-    portal_base_url: str = ""
-    inference_base_url: str = ""
-    client_id: str = ""
-    scope: str = ""
-    extra: dict = field(default_factory=dict)
-    api_key_env_vars: tuple = ()
-    base_url_env_var: str = ""
 
 
 def test_build_profile_fields():
@@ -40,10 +25,25 @@ def test_build_profile_fields():
     assert p.display_name == DISPLAY_NAME
     assert tuple(p.aliases) == PROVIDER_ALIASES
     assert p.api_mode == "chat_completions"
-    assert p.auth_type == "external_process"
+    # api_key (not external_process): this is what makes Hermes' auth.py
+    # auto-extend register us into PROVIDER_REGISTRY with no core edits.
+    assert p.auth_type == "api_key"
+    # The api-key var (split out by auto-extend) and the _BASE_URL override var.
+    assert tuple(p.env_vars) == (API_KEY_ENV_VAR, BASE_URL_ENV_VAR)
     assert p.supports_health_check is True
     assert p.base_url == "http://127.0.0.1:40123/v1"
     assert tuple(p.fallback_models) == FALLBACK_MODELS
+    # Shown during first-run setup per Hermes' model-provider plugin docs;
+    # points at our own install instructions since auth is `claude login`,
+    # not a web signup page.
+    assert p.signup_url == SIGNUP_URL
+    assert p.signup_url
+
+
+def test_no_claude_code_alias_collision():
+    # "claude-code" is a built-in alias of Hermes' own anthropic provider;
+    # claiming it would shadow that provider. Ours must not use it.
+    assert "claude-code" not in PROVIDER_ALIASES
 
 
 def test_fetch_models_fallback_when_proxy_down(monkeypatch):
@@ -72,44 +72,26 @@ def test_fetch_models_from_proxy(monkeypatch):
     assert p.fetch_models() == ["sonnet", "opus"]
 
 
-def test_register_is_safe_without_hermes():
-    # No 'providers' module installed in the test env — must not raise.
+def test_register_returns_profile(monkeypatch):
+    # register() must return the profile and publish a non-empty placeholder
+    # key + base URL into the environment so Hermes' api-key resolver (which
+    # rejects an empty key) can wire us up.
+    monkeypatch.delenv(API_KEY_ENV_VAR, raising=False)
+    monkeypatch.delenv(BASE_URL_ENV_VAR, raising=False)
     p = provider.register(Config(port=40999))
     assert p.name == PROVIDER_NAME
+    import os
+
+    assert os.environ[API_KEY_ENV_VAR] == LOCAL_API_KEY
+    assert os.environ[BASE_URL_ENV_VAR] == "http://127.0.0.1:40999/v1"
 
 
-def test_register_auth_provider_adds_external_process_entry():
-    # Reproduces the "Unknown provider" gap: an external_process provider is
-    # NOT auto-added by Hermes' api_key-only auto-extend, so we add it here.
-    registry: dict = {}
-    cfg = Config(port=41234)
-    pc = provider.register_auth_provider(
-        cfg, registry=registry, provider_config_cls=_FakeProviderConfig
-    )
-    assert PROVIDER_NAME in registry
-    entry = registry[PROVIDER_NAME]
-    assert entry is pc
-    assert entry.id == PROVIDER_NAME
-    assert entry.name == DISPLAY_NAME
-    assert entry.auth_type == "external_process"
-    assert entry.inference_base_url == "http://127.0.0.1:41234/v1"
-    assert entry.base_url_env_var == BASE_URL_ENV_VAR
-    # Aliases resolve to the same config.
-    for alias in PROVIDER_ALIASES:
-        assert registry[alias] is pc
+def test_register_does_not_override_user_env(monkeypatch):
+    # A user-provided key/base URL must win over our placeholder defaults.
+    monkeypatch.setenv(API_KEY_ENV_VAR, "user-key")
+    monkeypatch.setenv(BASE_URL_ENV_VAR, "http://example.invalid/v1")
+    provider.register(Config(port=40998))
+    import os
 
-
-def test_register_auth_provider_does_not_clobber_existing_alias():
-    sentinel = object()
-    # An existing built-in claims one of our aliases — must be preserved.
-    registry = {"claude-code": sentinel}
-    provider.register_auth_provider(
-        Config(), registry=registry, provider_config_cls=_FakeProviderConfig
-    )
-    assert registry["claude-code"] is sentinel
-    assert registry[PROVIDER_NAME].auth_type == "external_process"
-
-
-def test_register_auth_provider_safe_without_hermes():
-    # No hermes_cli installed in the test env — must be a silent no-op.
-    assert provider.register_auth_provider(Config()) is None
+    assert os.environ[API_KEY_ENV_VAR] == "user-key"
+    assert os.environ[BASE_URL_ENV_VAR] == "http://example.invalid/v1"

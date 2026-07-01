@@ -45,6 +45,32 @@ def test_doctor_auth_via_env_key(monkeypatch):
     assert report["ok"] is True
 
 
+def test_doctor_warns_when_api_key_overrides_subscription(monkeypatch):
+    cfg = Config(port=8)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(doctor, "sdk_available", lambda: True)
+    monkeypatch.setattr(doctor.shutil, "which", lambda *_: "/usr/bin/claude")
+    monkeypatch.setattr(doctor, "proxy_status", lambda *a, **k: {
+        "running": True, "health": {"status": "ok"}, "pid": 1, "base_url": cfg.base_url, "port": 8,
+    })
+    report = doctor.run_doctor(cfg)
+    assert any("ANTHROPIC_API_KEY" in w for w in report["warnings"])
+    text = doctor.format_report(report)
+    assert "⚠" in text
+
+
+def test_doctor_no_warning_without_api_key(monkeypatch):
+    cfg = Config(port=9)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(doctor, "sdk_available", lambda: True)
+    monkeypatch.setattr(doctor.shutil, "which", lambda *_: None)
+    monkeypatch.setattr(doctor, "proxy_status", lambda *a, **k: {
+        "running": True, "health": {"status": "ok"}, "pid": 1, "base_url": cfg.base_url, "port": 9,
+    })
+    report = doctor.run_doctor(cfg)
+    assert report["warnings"] == []
+
+
 def test_format_report_renders():
     report = {
         "ok": True,
