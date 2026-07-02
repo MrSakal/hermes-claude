@@ -122,9 +122,13 @@ def _live_probe(cfg: Config) -> dict[str, Any]:
         )
         ok = resp.status_code == 200
         body = resp.json()
-        text = ""
         if ok:
             text = body["choices"][0]["message"].get("content") or ""
+        else:
+            # Surface the real upstream error instead of silently discarding
+            # it — this is what actually explains a live-probe failure (e.g.
+            # a Claude Code auth/billing error), not just the bare status code.
+            text = ((body.get("error") or {}).get("message")) or ""
         return {"ok": ok, "status_code": resp.status_code, "text": text}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
