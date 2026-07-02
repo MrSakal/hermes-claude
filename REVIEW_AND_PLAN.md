@@ -774,3 +774,60 @@ Három kérés érkezett a 13. pont munkája után:
    most az `AGENTS.md`‑re mutat a törölt README‑szakaszok helyett, és az
    utóbbi már a dokumentált CLI‑parancsot írja le a `load_config`/
    `save_config` helyett (elavult volt a 13. pont utáni váltás óta).
+
+## 15. „TUI és desktop nem listázza a modelleket" — élőben validált ok és javítás
+
+Felhasználói jelentés: a provider **válaszol** (tehát regisztrálva van,
+hitelesítve van, működik), de **nem választható ki** a TUI-ban és a
+desktop appban — máshol (feltehetően a szerveren futó régebbi telepítésen)
+viszont igen, kézi `config.yaml`/`--provider` beállítással.
+
+**Forrásból azonosított ok**: a TUI/desktop választó **nem**
+`providers.list_providers()`-t olvassa, hanem a `hermes_cli/models.py`
+`CANONICAL_PROVIDERS` listáját (`model.options` JSON‑RPC a
+`tui_gateway`‑en, ill. a `/api/model/options` REST végpont — mindkettő a
+`hermes_cli.inventory.build_models_payload`/`list_authenticated_providers`‑t
+hívja). A `CANONICAL_PROVIDERS` auto‑extendje **explicit kihagyja** azokat a
+providereket, amiknek `auth_type in {"oauth_device_code", "oauth_external",
+"external_process", "aws_sdk", "copilot"}` — idézet: „non‑api‑key flows need
+bespoke picker UX; skip auto‑inject". Ez egy **külön, a `PROVIDER_REGISTRY`‑
+től és a `providers.list_providers()`‑től független** szűrés — egy provider
+lehet teljesen működőképes (regisztrálva, hitelesítve, chat completions
+kiszolgálva), miközben ebből az EGY konkrét listából hiányzik.
+
+**Ez pontosan magyarázza a tünetet**: ha a szerveren egy, a `api_key`‑re
+váltás (l. 9. pont) **előtti** verzió fut, az `auth_type` még
+`"external_process"` — ami pont a kihagyási listán van.
+
+**Élőben validálva ezen a gépen** (a felhasználó kifejezett kérésére, majd
+teljes visszatakarítással):
+1. `pip install -e .[sdk]` a valódi Hermes venv‑be (mellékhatás: a Hermes
+   saját `fastapi`/`uvicorn` csomagjait is frissítette — 0.133.1→0.138.2,
+   0.41.0→0.49.0 — ezt is pontosan visszaállítottam takarításkor).
+2. `hermes-claude-code install` → `general_plugin_enabled: true` már első
+   futásra (a 14. pontban javított, dokumentált CLI‑útvonalon).
+3. Ellenőrzés: `auth_type: api_key` ✓, benne van `providers.list_providers()`‑
+   ben ✓, benne van `CANONICAL_PROVIDERS`‑ben ✓ (`ProviderEntry(slug=
+   'hermes-claude-code', label='Claude Code', ...)`).
+4. A teljes `build_models_payload` sor, amit a TUI/desktop ténylegesen
+   renderelne:
+   ```json
+   {"slug": "hermes-claude-code", "name": "Claude Code",
+    "models": ["Fable 5", "Opus 4.8", "Sonnet 4.6", "Haiku 4.5"],
+    "authenticated": true}
+   ```
+   — provider látható, hitelesítve, mind a 4 modell listázva.
+5. **Teljes takarítás**: `hermes-claude-code uninstall`, `config.yaml`
+   `plugins` szekció pontosan visszaállítva `{'enabled': []}`‑re (a
+   `disabled`/`entries` maradékok is törölve), `pip uninstall
+   hermes-claude-code claude-agent-sdk`, `fastapi`/`uvicorn` pontosan
+   visszaállítva az eredeti verzióra, üres `plugins/` könyvtárak törölve.
+   Ellenőrizve: a gép pontosan olyan állapotban maradt, mint a teszt előtt.
+
+**Következtetés a felhasználó felé**: a friss kóddal minden helyesen
+működik; a szerveren futó telepítést friss commitról kell újratelepíteni
+(`pip install --upgrade`). Új teszt: `tests/test_provider.py::
+test_auth_type_is_selectable_in_the_tui_desktop_picker` — explicit rögzíti a
+`CANONICAL_PROVIDERS` kihagyási listáját, hogy ez a hiba ne tudjon csendben
+visszakúszni. Dokumentálva `AGENTS.md` hibaelhárító táblázatában is.
+

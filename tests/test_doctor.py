@@ -71,6 +71,39 @@ def test_doctor_no_warning_without_api_key(monkeypatch):
     assert report["warnings"] == []
 
 
+def test_live_probe_surfaces_error_message_on_failure(monkeypatch):
+    # Previously the failure branch discarded the response body entirely,
+    # leaving `text` empty -- so `doctor --live` showed no explanation at
+    # all for e.g. a Claude Code auth/billing error. It must show the real
+    # error.message from the proxy's error payload.
+    class Resp:
+        status_code = 400
+
+        def json(self):
+            return {"error": {"message": "API Error: 400 something broke", "type": "server_error"}}
+
+    monkeypatch.setattr("httpx.post", lambda *a, **k: Resp())
+    cfg = Config(port=10)
+    result = doctor._live_probe(cfg)
+    assert result["ok"] is False
+    assert result["status_code"] == 400
+    assert result["text"] == "API Error: 400 something broke"
+
+
+def test_live_probe_returns_content_on_success(monkeypatch):
+    class Resp:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "pong"}}]}
+
+    monkeypatch.setattr("httpx.post", lambda *a, **k: Resp())
+    cfg = Config(port=11)
+    result = doctor._live_probe(cfg)
+    assert result["ok"] is True
+    assert result["text"] == "pong"
+
+
 def test_format_report_renders():
     report = {
         "ok": True,

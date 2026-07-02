@@ -35,10 +35,40 @@ def test_nonstream_claude_code_api_error_maps_to_proxy_error(make_client):
         "/v1/chat/completions",
         json={"model": "sonnet", "messages": [{"role": "user", "content": "x"}]},
     )
-    assert resp.status_code == 502
+    # Preserve Claude Code's own status (400) instead of collapsing every
+    # bridge failure to a generic 502 -- Hermes' retry/backoff and
+    # user-facing messaging both key off the real status code, and a genuine
+    # auth/billing error shouldn't look like a transient gateway hiccup.
+    assert resp.status_code == 400
     err = resp.json()["error"]
     assert err["type"] == "server_error"
     assert "out of extra usage" in err["message"]
+
+
+def test_other_claude_code_api_error_status_codes_are_preserved_too(make_client):
+    class Boom(FakeBridge):
+        async def complete(self, conv):
+            raise ClaudeCodeAPIError("API Error: 429 rate limited, try later", 429)
+
+    client = make_client(bridge=Boom())
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"model": "sonnet", "messages": [{"role": "user", "content": "x"}]},
+    )
+    assert resp.status_code == 429
+
+
+def test_non_claude_code_api_errors_still_return_502(make_client):
+    class Boom(FakeBridge):
+        async def complete(self, conv):
+            raise RuntimeError("some other unrelated failure")
+
+    client = make_client(bridge=Boom())
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"model": "sonnet", "messages": [{"role": "user", "content": "x"}]},
+    )
+    assert resp.status_code == 502
 
 
 def test_cli_json_error_result_raises(monkeypatch):
