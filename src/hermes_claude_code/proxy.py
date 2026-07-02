@@ -26,7 +26,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import __version__
-from .bridge import ClaudeBridge, preemptive_host_tool_call, prepare_conversation, sdk_available
+from .bridge import (
+    ClaudeBridge,
+    ClaudeCodeAPIError,
+    preemptive_host_tool_call,
+    prepare_conversation,
+    sdk_available,
+)
 from .config import Config, MODEL_OWNER, get_config
 
 
@@ -263,6 +269,20 @@ def create_app(bridge: Any | None = None, config: Config | None = None):
 
         try:
             result = await bridge.complete(conv)
+        except ClaudeCodeAPIError as exc:
+            # Preserve Claude Code's own status (400/401/402/429/...) instead
+            # of collapsing every failure to a generic 502 — Hermes' client
+            # retry/backoff and user-facing messaging both key off this, and
+            # a real auth/billing error shouldn't look like a transient
+            # gateway hiccup worth retrying 3x.
+            logger.exception(
+                "nonstream failed (claude code api error, status=%s): %s",
+                exc.status_code, exc,
+            )
+            return JSONResponse(
+                status_code=exc.status_code or 502,
+                content=error_payload(str(exc), "server_error"),
+            )
         except Exception as exc:
             logger.exception("nonstream failed: %s", exc)
             return JSONResponse(
