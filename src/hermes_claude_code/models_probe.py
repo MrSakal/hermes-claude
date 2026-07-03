@@ -143,17 +143,64 @@ def write_models_cache(config: Config, results: list[dict[str, Any]]) -> None:
         for r in working
         if r["backend"] and r["backend"] != MODEL_ID_ALIASES.get(r["model"], r["model"])
     }
-    config.run_dir.mkdir(parents=True, exist_ok=True)
-    config.models_cache_file.write_text(
-        json.dumps(
-            {
-                "models": [r["model"] for r in working],
-                "backend_overrides": overrides,
-                "probed_at": int(time.time()),
-            }
-        ),
-        encoding="utf-8",
+    unavailable = [
+        r["model"] for r in results if r["status"] == STATUS_EXTRA_USAGE
+    ]
+    _write_cache(
+        config,
+        {
+            "models": [r["model"] for r in working],
+            "backend_overrides": overrides,
+            "unavailable": unavailable,
+            "probed_at": int(time.time()),
+        },
     )
+
+
+def _write_cache(config: Config, data: dict[str, Any]) -> None:
+    config.run_dir.mkdir(parents=True, exist_ok=True)
+    config.models_cache_file.write_text(json.dumps(data), encoding="utf-8")
+
+
+def record_backend_override(config: Config, display: str, backend: str) -> None:
+    """Persist a runtime-discovered working selector for *display*.
+
+    Called by the bridge's self-healing fallback when the primary selector
+    hit the extra-usage wall but an alternate candidate worked — so every
+    later request (and proxy restart) goes straight to the proven selector.
+    """
+    data = _read_cache(config) or {}
+    overrides = dict(data.get("backend_overrides") or {})
+    overrides[display] = backend
+    data["backend_overrides"] = overrides
+    # The model demonstrably works now — clear any stale unavailability.
+    data["unavailable"] = [
+        m for m in data.get("unavailable") or [] if m != display
+    ]
+    # Only extend an existing probe whitelist; when there is none, the picker
+    # already shows the full default list and must stay that way.
+    models = data.get("models")
+    if isinstance(models, list) and display not in models:
+        models.append(display)
+    data["updated_at"] = int(time.time())
+    _write_cache(config, data)
+
+
+def record_model_unavailable(config: Config, display: str) -> None:
+    """Mark *display* as not plan-covered (every candidate hit extra usage).
+
+    The picker stops offering it (see ``effective_models``) until a probe or
+    ``models --reset`` clears the cache.
+    """
+    data = _read_cache(config) or {}
+    unavailable = list(data.get("unavailable") or [])
+    if display not in unavailable:
+        unavailable.append(display)
+    data["unavailable"] = unavailable
+    if data.get("models"):
+        data["models"] = [m for m in data["models"] if m != display]
+    data["updated_at"] = int(time.time())
+    _write_cache(config, data)
 
 
 def _read_cache(config: Config) -> dict[str, Any] | None:
@@ -162,16 +209,6 @@ def _read_cache(config: Config) -> dict[str, Any] | None:
         return data if isinstance(data, dict) else None
     except Exception:
         return None
-
-
-def read_models_cache(config: Config) -> tuple | None:
-    data = _read_cache(config)
-    if not data:
-        return None
-    models = tuple(
-        m for m in data.get("models", []) if isinstance(m, str) and m.strip()
-    )
-    return models or None
 
 
 def clear_models_cache(config: Config) -> bool:
@@ -188,16 +225,24 @@ def effective_models(config: Config | None = None) -> tuple:
     """The model list the proxy should expose.
 
     Precedence: explicit ``HERMES_CLAUDE_CODE_MODELS`` env override (the user
-    said exactly what they want) > probed working-set cache > built-in
-    defaults.
+    said exactly what they want) > probed/learned working set > built-in
+    defaults. Models the runtime fallback marked ``unavailable`` (every
+    selector hit the extra-usage wall) are filtered out — but never down to
+    an empty picker.
     """
     cfg = config or get_config()
     if os.environ.get(MODELS_ENV_VAR, "").strip():
         return cfg.models  # get_config already parsed the override
-    cached = read_models_cache(cfg)
-    if cached:
-        return cached
-    return cfg.models
+    data = _read_cache(cfg) or {}
+    whitelist = tuple(
+        m for m in data.get("models") or [] if isinstance(m, str) and m.strip()
+    )
+    base = whitelist or cfg.models
+    unavailable = {
+        m for m in data.get("unavailable") or [] if isinstance(m, str)
+    }
+    filtered = tuple(m for m in base if m not in unavailable)
+    return filtered or cfg.models
 
 
 # Memoised on the cache file's mtime: backend_overrides() sits on the

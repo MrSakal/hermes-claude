@@ -46,19 +46,27 @@ Or just pick it interactively with `hermes model`.
 Which models your subscription serves — and under which selector — is decided
 server-side per plan and per route, and can't be predicted (e.g. a Team plan
 was seen serving `claude-fable-5` interactively while rejecting `fable` over
-the SDK with "out of extra usage"). So the plugin measures instead of
-guessing:
+the SDK with "out of extra usage"). The plugin handles this **automatically**:
+
+- When a request is rejected with "out of extra usage", the bridge instantly
+  retries the same request with the model's other known selectors (alias ↔
+  current full ID). If one works, the response is served normally and the
+  working selector is remembered — you see nothing but a slightly slower
+  first message.
+- If *no* selector works, the error is returned once and the model is
+  removed from the picker, so you can't stumble into it again.
+
+No manual steps required. Optional controls:
 
 ```bash
-hermes-claude-code models --probe --apply
+hermes-claude-code models                  # show the current effective list
+hermes-claude-code models --probe --apply  # test everything up front instead
+hermes-claude-code models --reset          # forget learned state, full list again
 ```
 
-This sends a one-line test message per model (trying each known selector),
-prints what works on *your* subscription, and saves the working set. From
-then on the Hermes picker only offers models that actually work, each routed
-through its proven selector. Re-run it after a plan change;
-`hermes-claude-code models --reset` restores the full default list. The same
-probe is available in-session as `/claude-code models`.
+The probe is also available in-session as `/claude-code models`. Re-run
+`--reset` (or the probe) after a plan change so hidden models get another
+chance.
 
 ## Managing the proxy
 
