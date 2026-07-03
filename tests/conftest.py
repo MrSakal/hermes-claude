@@ -54,6 +54,7 @@ class FakeBridge:
             "finish_reason": result.finish_reason,
             "tool_calls": result.tool_calls,
             "session_id": result.session_id,
+            "usage": result.usage,
         }
 
 

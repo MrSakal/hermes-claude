@@ -101,6 +101,9 @@ def models_payload(config: Config) -> dict[str, Any]:
     }
 
 
+_ZERO_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
 def completion_response(
     *,
     model: str,
@@ -108,6 +111,7 @@ def completion_response(
     finish_reason: str,
     tool_calls: list[dict[str, Any]],
     reasoning_content: str = "",
+    usage: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "assistant", "content": text or None}
     if reasoning_content:
@@ -126,15 +130,20 @@ def completion_response(
                 "finish_reason": finish_reason,
             }
         ],
-        "usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-        },
+        # Real token counts from the Claude Code backend when reported;
+        # zeros otherwise (e.g. preemptive host tool calls that never hit
+        # the model) so Hermes' cost accounting is never fed garbage.
+        "usage": dict(usage) if usage else dict(_ZERO_USAGE),
     }
 
 
-def _chunk(model: str, cmpl_id: str, delta: dict[str, Any], finish: Any = None) -> str:
+def _chunk(
+    model: str,
+    cmpl_id: str,
+    delta: dict[str, Any],
+    finish: Any = None,
+    usage: dict[str, int] | None = None,
+) -> str:
     payload = {
         "id": cmpl_id,
         "object": "chat.completion.chunk",
@@ -142,6 +151,10 @@ def _chunk(model: str, cmpl_id: str, delta: dict[str, Any], finish: Any = None) 
         "model": model,
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
     }
+    if usage:
+        # OpenAI puts usage on the terminal chunk; extra field is ignored by
+        # clients that don't read it.
+        payload["usage"] = dict(usage)
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
@@ -232,25 +245,30 @@ def create_app(bridge: Any | None = None, config: Config | None = None):
                 yield _chunk(conv.model, cmpl_id, {"role": "assistant"})
                 finish = "stop"
                 tool_calls: list[dict[str, Any]] = []
+                usage: dict[str, int] | None = None
                 try:
                     async for evt in bridge.stream(conv):
                         if evt.get("type") == "text" and evt.get("text"):
-                            logger.info("stream text_delta chars=%d", len(evt["text"]))
+                            # DEBUG: this fires per delta — INFO here floods the
+                            # log file with one line per streamed fragment.
+                            logger.debug("stream text_delta chars=%d", len(evt["text"]))
                             yield _chunk(
                                 conv.model, cmpl_id, {"content": evt["text"]}
                             )
                         elif evt.get("type") == "reasoning" and evt.get("text"):
-                            logger.info("stream reasoning_delta chars=%d", len(evt["text"]))
+                            logger.debug("stream reasoning_delta chars=%d", len(evt["text"]))
                             yield _chunk(
                                 conv.model, cmpl_id, {"reasoning_content": evt["text"]}
                             )
                         elif evt.get("type") == "done":
                             finish = evt.get("finish_reason", "stop")
                             tool_calls = evt.get("tool_calls") or []
+                            usage = evt.get("usage")
                             logger.info(
-                                "stream done finish=%s tool_calls=%d",
+                                "stream done finish=%s tool_calls=%d usage=%s",
                                 finish,
                                 len(tool_calls),
+                                usage,
                             )
                 except Exception as exc:  # pragma: no cover - live failure path
                     logger.exception("stream failed: %s", exc)
@@ -260,7 +278,7 @@ def create_app(bridge: Any | None = None, config: Config | None = None):
                 if tool_calls:
                     _log_host_tool_calls("stream", tool_calls)
                     yield _chunk(conv.model, cmpl_id, {"tool_calls": tool_calls})
-                yield _chunk(conv.model, cmpl_id, {}, finish=finish)
+                yield _chunk(conv.model, cmpl_id, {}, finish=finish, usage=usage)
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(
@@ -290,11 +308,12 @@ def create_app(bridge: Any | None = None, config: Config | None = None):
                 content=error_payload(str(exc), "server_error"),
             )
         logger.info(
-            "nonstream done finish=%s tool_calls=%d reasoning_chars=%d text_chars=%d",
+            "nonstream done finish=%s tool_calls=%d reasoning_chars=%d text_chars=%d usage=%s",
             result.finish_reason,
             len(result.tool_calls),
             len(result.reasoning_content or ""),
             len(result.text or ""),
+            result.usage,
         )
         if result.tool_calls:
             _log_host_tool_calls("nonstream", result.tool_calls)
@@ -304,6 +323,7 @@ def create_app(bridge: Any | None = None, config: Config | None = None):
             finish_reason=result.finish_reason,
             tool_calls=result.tool_calls,
             reasoning_content=result.reasoning_content,
+            usage=result.usage,
         )
 
     return app

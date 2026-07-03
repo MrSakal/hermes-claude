@@ -4,8 +4,7 @@ This file is written for an AI coding agent (e.g. Claude Code) asked to
 install this plugin into a user's Hermes environment. It is deliberately
 explicit and procedural: exact commands, exact success/failure checks, and a
 troubleshooting table for what's actually been seen to go wrong. Every claim
-here has been verified against a real Hermes install, not just its docs — see
-`REVIEW_AND_PLAN.md` for the underlying source-level evidence if you need it.
+here has been verified against a real Hermes install, not just its docs.
 
 If you are a human reading this: it's the same instructions, just written
 step-by-step instead of narratively. `README.md` is the short version.
@@ -139,7 +138,7 @@ an error.
   Hermes' GitHub-install flow. It genuinely needs `claude-agent-sdk`,
   `fastapi`, `uvicorn`, and `httpx` for its full feature set (streaming,
   native tool bridging, vision). A `pip install` step is an accepted,
-  deliberate tradeoff — see `REVIEW_AND_PLAN.md` §13 if you want the reasoning.
+  deliberate tradeoff.
 
 ## Troubleshooting
 
