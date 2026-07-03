@@ -98,12 +98,12 @@ def test_build_options_function_directive_and_single_tool():
         _conv({"type": "function", "function": {"name": "web_search"}})
     )
     assert options.allowed_tools == ["mcp__hermes-tools__web_search"]
-    assert "MUST call the Hermes MCP tool 'web_search'" in options.system_prompt
+    assert "MUST call the Hermes MCP tool 'web_search'" in options.system_prompt["append"]
 
 
 def test_build_options_required_directive():
     options, _ = ClaudeBridge(Config())._build_options(_conv("required"))
-    assert "MUST call one of the available Hermes MCP tools" in options.system_prompt
+    assert "MUST call one of the available Hermes MCP tools" in options.system_prompt["append"]
 
 
 # -- apply_tool_choice ------------------------------------------------------ #
