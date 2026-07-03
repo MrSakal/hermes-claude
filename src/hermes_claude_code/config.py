@@ -45,11 +45,18 @@ DEFAULT_MODELS = (
     "Haiku 4.5",
 )
 # Claude Code needs CLI/API selector values, not human display names.
+#
+# SUBSCRIPTION-CRITICAL: these MUST be Claude Code's model *aliases*
+# (sonnet/opus/haiku/...), never pinned model IDs like ``claude-sonnet-4-6``.
+# Verified live (2026-07-03, same proxy, same credentials, 30s apart): the
+# ``sonnet`` alias was served from the Claude subscription allowance, while
+# the pinned ``claude-sonnet-4-6`` ID failed with ``API Error: 400 You're
+# out of extra usage`` — pinned IDs are billed as extra usage.
 MODEL_ID_ALIASES = {
-    "Fable 5": "claude-fable-5",
-    "Opus 4.8": "claude-opus-4-8",
-    "Sonnet 4.6": "claude-sonnet-4-6",
-    "Haiku 4.5": "claude-haiku-4-5-20251001",
+    "Fable 5": "fable",
+    "Opus 4.8": "opus",
+    "Sonnet 4.6": "sonnet",
+    "Haiku 4.5": "haiku",
 }
 FALLBACK_MODELS = DEFAULT_MODELS
 MODEL_OWNER = "anthropic-claude-code"
