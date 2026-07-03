@@ -41,11 +41,17 @@ DEFAULT_PORT = 35345
 # Model names shown to Hermes users. Keep these aligned with Claude/claude.ai
 # public product names, but omit the redundant "Claude" prefix because the
 # provider row is already named "Claude Code".
+# The picker exposes Claude Code's own model selectors VERBATIM. These are
+# the exact strings the working reference invocation uses (`-m sonnet`), so
+# what the user picks is byte-for-byte what the backend receives — no
+# display-name indirection to go wrong. `sonnet` first: it is the
+# live-verified subscription-served selector, and the first entry doubles as
+# the default model.
 DEFAULT_MODELS = (
-    "Fable 5",
-    "Opus 4.8",
-    "Sonnet 5",
-    "Haiku 4.5",
+    "sonnet",
+    "haiku",
+    "opus",
+    "fable",
 )
 # Claude Code needs CLI/API selector values, not human display names.
 #
@@ -56,12 +62,12 @@ DEFAULT_MODELS = (
 # the pinned ``claude-sonnet-4-6`` ID failed with ``API Error: 400 You're
 # out of extra usage`` — pinned IDs are billed as extra usage.
 MODEL_ID_ALIASES = {
+    # Back-compat: sessions/configs saved while the picker showed display
+    # names keep routing to the same selectors.
     "Fable 5": "fable",
     "Opus 4.8": "opus",
     "Sonnet 5": "sonnet",
     "Haiku 4.5": "haiku",
-    # Back-compat: sessions/configs saved before the Sonnet 5 rename still
-    # send the old display name; keep it routed to the same alias.
     "Sonnet 4.6": "sonnet",
 }
 # Candidate backend selectors per display model, in probe order. Which
@@ -72,6 +78,11 @@ MODEL_ID_ALIASES = {
 # `hermes-claude-code models --probe` tries these in order and records the
 # first one that works as a backend override for that display name.
 BACKEND_CANDIDATES = {
+    "sonnet": ("sonnet", "claude-sonnet-5"),
+    "haiku": ("haiku", "claude-haiku-4-5-20251001"),
+    "opus": ("opus", "claude-opus-4-8"),
+    "fable": ("fable", "claude-fable-5"),
+    # Legacy display names (pre-verbatim picker).
     "Fable 5": ("fable", "claude-fable-5"),
     "Opus 4.8": ("opus", "claude-opus-4-8"),
     "Sonnet 5": ("sonnet", "claude-sonnet-5"),
@@ -83,7 +94,7 @@ MODEL_OWNER = "anthropic-claude-code"
 # Cheap/fast model Hermes should use for auxiliary work (vision summaries,
 # context compression, memory flushes) so those never burn the main model.
 # A catalog display name so the proxy maps it via MODEL_ID_ALIASES.
-DEFAULT_AUX_MODEL = "Haiku 4.5"
+DEFAULT_AUX_MODEL = "haiku"
 
 
 def hermes_home() -> Path:

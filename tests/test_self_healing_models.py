@@ -88,7 +88,7 @@ def test_complete_marks_model_unavailable_when_all_candidates_fail():
     # Picker no longer offers the model; the rest of the lineup remains.
     cfg = get_config()
     assert "Fable 5" not in effective_models(cfg)
-    assert "Sonnet 5" in effective_models(cfg)
+    assert "sonnet" in effective_models(cfg)
 
 
 def test_complete_does_not_retry_non_extra_usage_errors():
@@ -149,13 +149,13 @@ def test_stream_does_not_retry_after_output_started():
 
 def test_unavailable_models_are_hidden_but_recoverable():
     cfg = get_config()
-    models_probe.record_model_unavailable(cfg, "Fable 5")
-    assert "Fable 5" not in effective_models(cfg)
+    models_probe.record_model_unavailable(cfg, "fable")
+    assert "fable" not in effective_models(cfg)
 
     # A later successful fallback (e.g. plan change) restores it.
     models_probe._OVERRIDES_MEMO.update(mtime=None, map={})
-    models_probe.record_backend_override(cfg, "Fable 5", "claude-fable-5")
-    assert "Fable 5" in effective_models(cfg)
+    models_probe.record_backend_override(cfg, "fable", "claude-fable-5")
+    assert "fable" in effective_models(cfg)
 
 
 def test_complete_falls_back_by_stripping_effort():
