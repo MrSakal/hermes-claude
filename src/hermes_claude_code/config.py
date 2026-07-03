@@ -28,6 +28,9 @@ SIGNUP_URL = "https://github.com/MrSakal/hermes-claude#install"
 API_KEY_ENV_VAR = "HERMES_CLAUDE_CODE_API_KEY"
 # Env var the Hermes auth layer can use to override the proxy base URL.
 BASE_URL_ENV_VAR = "HERMES_CLAUDE_CODE_BASE_URL"
+# Env var holding an explicit comma-separated model list. When set, it wins
+# over both the probed working-set cache and the built-in defaults.
+MODELS_ENV_VAR = "HERMES_CLAUDE_CODE_MODELS"
 # Non-empty placeholder key. The proxy is a local trusted endpoint and needs no
 # real credential, but the api-key resolver (and OpenAI SDK) reject an empty
 # api_key string, so we publish this constant into the env via ``register()``.
@@ -60,6 +63,20 @@ MODEL_ID_ALIASES = {
     # Back-compat: sessions/configs saved before the Sonnet 5 rename still
     # send the old display name; keep it routed to the same alias.
     "Sonnet 4.6": "sonnet",
+}
+# Candidate backend selectors per display model, in probe order. Which
+# selector a given subscription serves is a server-side policy that differs
+# by plan AND by route (interactive vs SDK) and cannot be predicted — e.g.
+# verified live on a Team plan: interactive `claude-fable-5` billed to the
+# subscription while SDK `fable` was rejected with "out of extra usage".
+# `hermes-claude-code models --probe` tries these in order and records the
+# first one that works as a backend override for that display name.
+BACKEND_CANDIDATES = {
+    "Fable 5": ("fable", "claude-fable-5"),
+    "Opus 4.8": ("opus", "claude-opus-4-8"),
+    "Sonnet 5": ("sonnet", "claude-sonnet-5"),
+    "Haiku 4.5": ("haiku", "claude-haiku-4-5-20251001"),
+    "Sonnet 4.6": ("sonnet",),
 }
 FALLBACK_MODELS = DEFAULT_MODELS
 MODEL_OWNER = "anthropic-claude-code"
@@ -172,6 +189,12 @@ class Config:
         return self.run_dir / "hermes-claude-code.pid"
 
     @property
+    def models_cache_file(self) -> Path:
+        # Written by `hermes-claude-code models --probe --apply`; read by the
+        # proxy's /v1/models (see models_probe.effective_models).
+        return self.run_dir / "hermes-claude-code.models.json"
+
+    @property
     def log_file(self) -> Path:
         return hermes_home() / "logs" / "hermes-claude-code.log"
 
@@ -187,5 +210,5 @@ def get_config() -> Config:
         request_timeout=_env_float("HERMES_CLAUDE_CODE_TIMEOUT", 600.0),
         startup_timeout=_env_float("HERMES_CLAUDE_CODE_STARTUP_TIMEOUT", 30.0),
         force_subscription=_env_bool("HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION", False),
-        models=_env_models("HERMES_CLAUDE_CODE_MODELS", DEFAULT_MODELS),
+        models=_env_models(MODELS_ENV_VAR, DEFAULT_MODELS),
     )

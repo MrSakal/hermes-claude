@@ -56,6 +56,25 @@ def _slash_handler(raw_args: str) -> str:
         return json.dumps(stop_proxy(cfg), indent=2)
     if sub == "doctor":
         return format_report(run_doctor(cfg))
+    if sub == "models":
+        from .models_probe import (
+            STATUS_OK,
+            format_probe_results,
+            probe_models,
+            write_models_cache,
+        )
+
+        ensure_proxy_running(cfg)
+        results = probe_models(cfg)
+        working = [r["model"] for r in results if r["status"] == STATUS_OK]
+        text = format_probe_results(results)
+        if working:
+            write_models_cache(cfg, results)
+            text += (
+                "\n\nSaved — the model picker now offers only the working "
+                "models, each routed through its proven selector."
+            )
+        return text
     return _status_text()
 
 

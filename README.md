@@ -41,6 +41,25 @@ model:
 
 Or just pick it interactively with `hermes model`.
 
+## Which models can I pick?
+
+Which models your subscription serves — and under which selector — is decided
+server-side per plan and per route, and can't be predicted (e.g. a Team plan
+was seen serving `claude-fable-5` interactively while rejecting `fable` over
+the SDK with "out of extra usage"). So the plugin measures instead of
+guessing:
+
+```bash
+hermes-claude-code models --probe --apply
+```
+
+This sends a one-line test message per model (trying each known selector),
+prints what works on *your* subscription, and saves the working set. From
+then on the Hermes picker only offers models that actually work, each routed
+through its proven selector. Re-run it after a plan change;
+`hermes-claude-code models --reset` restores the full default list. The same
+probe is available in-session as `/claude-code models`.
+
 ## Managing the proxy
 
 ```bash
