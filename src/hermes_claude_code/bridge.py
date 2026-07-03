@@ -634,9 +634,19 @@ def prepare_conversation(payload: dict[str, Any], config: Config) -> Conversatio
 
     requested_model = str(payload.get("model") or config.models[0])
 
+    # Prefer the selector the model probe proved to work on this
+    # subscription/route (e.g. Fable may only be plan-covered via its full
+    # ID over the SDK); fall back to the static alias mapping.
+    from .models_probe import backend_overrides
+
+    backend_model = (
+        backend_overrides(config).get(requested_model)
+        or MODEL_ID_ALIASES.get(requested_model, requested_model)
+    )
+
     return Conversation(
         model=requested_model,
-        backend_model=MODEL_ID_ALIASES.get(requested_model, requested_model),
+        backend_model=backend_model,
         system_prompt=system_prompt,
         prompt=prompt,
         tools=payload.get("tools") or [],
