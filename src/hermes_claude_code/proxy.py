@@ -41,17 +41,22 @@ logger = logging.getLogger("hermes_claude_code.proxy")
 
 
 def _setup_logging(cfg: Config) -> None:
-    """Write proxy diagnostics to ~/.hermes/logs/hermes-claude-code.log."""
-    if logger.handlers:
+    """Write plugin diagnostics to ~/.hermes/logs/hermes-claude-code.log.
+
+    Configured on the package logger so records from every module (proxy,
+    bridge self-healing, ...) land in the same file.
+    """
+    package_logger = logging.getLogger("hermes_claude_code")
+    if package_logger.handlers:
         return
     cfg.log_file.parent.mkdir(parents=True, exist_ok=True)
     handler = logging.FileHandler(cfg.log_file, encoding="utf-8")
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     )
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
+    package_logger.addHandler(handler)
+    package_logger.setLevel(logging.INFO)
+    package_logger.propagate = False
 
 
 def _tool_names(payload: dict[str, Any]) -> list[str]:

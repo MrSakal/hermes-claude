@@ -144,4 +144,4 @@ def test_cache_file_shape_is_stable():
         [{"model": "Sonnet 5", "backend": "sonnet", "status": STATUS_OK, "detail": ""}],
     )
     data = json.loads(cfg.models_cache_file.read_text(encoding="utf-8"))
-    assert set(data) == {"models", "backend_overrides", "probed_at"}
+    assert set(data) == {"models", "backend_overrides", "unavailable", "probed_at"}

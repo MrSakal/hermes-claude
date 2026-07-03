@@ -251,7 +251,7 @@ def test_stream_fallback_yields_reasoning_before_text(monkeypatch):
         None,  # ensure SDK path is never called
     )
 
-    # Patch complete() to return a result with reasoning_content
+    # Patch the single-attempt completion the stream fallback consumes.
     async def fake_complete(self, conv):
         return BridgeResult(
             text="final answer",
@@ -259,7 +259,7 @@ def test_stream_fallback_yields_reasoning_before_text(monkeypatch):
             finish_reason="stop",
         )
 
-    monkeypatch.setattr(ClaudeBridge, "complete", fake_complete)
+    monkeypatch.setattr(ClaudeBridge, "_complete_once", fake_complete)
 
     # Force the SDK path to fail so the fallback triggers.
     # We do this by making sdk_available() return True but _stream_sdk raise.
