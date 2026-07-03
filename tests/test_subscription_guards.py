@@ -44,3 +44,18 @@ def test_stale_proxy_version_detection():
     assert _proxy_version_current({"status": "ok", "version": "0.1.0"}) is False
     assert _proxy_version_current({"status": "ok"}) is False
     assert _proxy_version_current(None) is False
+
+
+def test_proxy_replacement_never_downgrades():
+    # Verified live: an environment still carrying an old plugin killed the
+    # NEWER running proxy and served through old code. Replacement must be
+    # strictly upgrade-only.
+    from hermes_claude_code import __version__
+    from hermes_claude_code.proxy import _proxy_outdated
+
+    assert _proxy_outdated({"status": "ok", "version": "0.1.0"}) is True
+    assert _proxy_outdated({"status": "ok", "version": __version__}) is False
+    assert _proxy_outdated({"status": "ok", "version": "99.0.0"}) is False
+    # Unknown version = oldest → replace.
+    assert _proxy_outdated({"status": "ok"}) is True
+    assert _proxy_outdated(None) is False
