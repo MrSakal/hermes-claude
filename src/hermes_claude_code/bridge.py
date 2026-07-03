@@ -330,6 +330,35 @@ def _raise_if_claude_api_error(text: str | None, status_code: int | None = None)
     raise ClaudeCodeAPIError(value, parsed_status)
 
 
+def _result_error_detail(message: Any) -> str:
+    """Human-readable cause from an errored ``ResultMessage``.
+
+    ``ResultMessage.result`` is frequently empty on failures, which is why the
+    bridge used to surface the useless "Claude Code SDK error". The real cause
+    lives in ``subtype`` / ``stop_reason`` / ``errors`` / ``permission_denials``
+    — collect whatever is present so logs and the client error say something
+    actionable.
+    """
+    parts: list[str] = []
+    for attr in ("subtype", "stop_reason"):
+        val = getattr(message, attr, None)
+        if val:
+            parts.append(f"{attr}={val}")
+    errors = getattr(message, "errors", None)
+    if errors:
+        parts.append(f"errors={errors}")
+    denials = getattr(message, "permission_denials", None)
+    if denials:
+        # A denied tool the model tried to call — the usual cause of an
+        # otherwise-empty error on a plain chat turn under the claude_code
+        # preset.
+        parts.append(f"permission_denials={denials}")
+    result = (getattr(message, "result", None) or "").strip()
+    if result:
+        parts.append(result)
+    return "; ".join(parts) or "Claude Code SDK error"
+
+
 def _assistant_error_to_exception(message: Any) -> ClaudeCodeAPIError | None:
     """Return an exception for authoritative AssistantMessage errors.
 
@@ -705,6 +734,12 @@ Host tool protocol:
 - After calling a host MCP tool, stop and let the host return the tool result.
 """.strip()
 
+_NO_TOOLS_SYSTEM_PROMPT = """
+No tools are available in this environment. Do not attempt to call, plan, or
+reference any tool (no TodoWrite, Task, Bash, Read, Edit, WebFetch, etc.).
+Respond to the user directly with a normal text answer.
+""".strip()
+
 
 # Env vars that reroute Claude Code's auth/endpoint away from the
 # `claude login` subscription. Verified live: an inherited ANTHROPIC_API_KEY
@@ -860,6 +895,12 @@ class ClaudeBridge:
             # set — headless, that risks Claude Code hanging on a
             # tool-approval prompt nobody can answer.
             kwargs["tools"] = []
+            # The claude_code preset system prompt (kept for subscription
+            # billing) describes Claude Code's native tools at length, which
+            # nudges the model to attempt one (TodoWrite, Task, ...). With
+            # tools disabled that attempt ends the run in an error state.
+            # Steer it back to plain conversation.
+            system_appends.append(_NO_TOOLS_SYSTEM_PROMPT)
 
         preset: dict[str, Any] = {"type": "preset", "preset": "claude_code"}
         if system_appends:
@@ -912,10 +953,22 @@ class ClaudeBridge:
                     result_text = message.result
                     usage = usage_to_openai(getattr(message, "usage", None))
                     if message.is_error:
-                        raise ClaudeCodeAPIError(
-                            result_text or "Claude Code SDK error",
-                            message.api_error_status,
-                        )
+                        # Graceful partial: the model already produced usable
+                        # content (text/thinking/tool call) but the run ended
+                        # in an error state — commonly the claude_code preset
+                        # nudging the model to attempt a tool that isn't
+                        # available here. Deliver what we have instead of
+                        # discarding a good answer over a post-hoc error.
+                        if text_parts or tool_calls:
+                            logger.info(
+                                "tolerating errored ResultMessage with content: %s",
+                                _result_error_detail(message),
+                            )
+                        else:
+                            raise ClaudeCodeAPIError(
+                                _result_error_detail(message),
+                                message.api_error_status,
+                            )
         except Exception as exc:
             if "maximum number of turns" not in str(exc).lower() or not (captured or tool_calls):
                 raise
@@ -983,10 +1036,18 @@ class ClaudeBridge:
                     result_text = message.result
                     usage = usage_to_openai(getattr(message, "usage", None))
                     if message.is_error:
-                        raise ClaudeCodeAPIError(
-                            result_text or "Claude Code SDK error",
-                            message.api_error_status,
-                        )
+                        # See _complete_sdk: deliver already-streamed content
+                        # rather than turning a good answer into an error.
+                        if text_parts or reasoning_parts or tool_calls:
+                            logger.info(
+                                "tolerating errored ResultMessage with content: %s",
+                                _result_error_detail(message),
+                            )
+                        else:
+                            raise ClaudeCodeAPIError(
+                                _result_error_detail(message),
+                                message.api_error_status,
+                            )
         except Exception as exc:
             if "maximum number of turns" not in str(exc).lower() or not (captured or tool_calls):
                 raise

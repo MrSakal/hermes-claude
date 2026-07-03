@@ -129,7 +129,8 @@ def test_sdk_options_always_use_claude_code_preset_system_prompt():
         {"messages": [{"role": "user", "content": "hi"}]}, Config()
     )
     options, _ = ClaudeBridge(Config())._build_options(plain)
-    assert options.system_prompt == {"type": "preset", "preset": "claude_code"}
+    assert options.system_prompt["type"] == "preset"
+    assert options.system_prompt["preset"] == "claude_code"
 
     with_system = prepare_conversation(
         {
