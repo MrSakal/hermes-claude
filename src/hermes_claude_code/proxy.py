@@ -98,13 +98,11 @@ def _now() -> int:
 
 
 def models_payload(config: Config) -> dict[str, Any]:
-    from .models_probe import effective_models
-
     return {
         "object": "list",
         "data": [
             {"id": m, "object": "model", "created": _now(), "owned_by": MODEL_OWNER}
-            for m in effective_models(config)
+            for m in config.models
         ],
     }
 

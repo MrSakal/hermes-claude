@@ -70,25 +70,6 @@ MODEL_ID_ALIASES = {
     "Haiku 4.5": "haiku",
     "Sonnet 4.6": "sonnet",
 }
-# Candidate backend selectors per display model, in probe order. Which
-# selector a given subscription serves is a server-side policy that differs
-# by plan AND by route (interactive vs SDK) and cannot be predicted — e.g.
-# verified live on a Team plan: interactive `claude-fable-5` billed to the
-# subscription while SDK `fable` was rejected with "out of extra usage".
-# `hermes-claude-code models --probe` tries these in order and records the
-# first one that works as a backend override for that display name.
-BACKEND_CANDIDATES = {
-    "sonnet": ("sonnet", "claude-sonnet-5"),
-    "haiku": ("haiku", "claude-haiku-4-5-20251001"),
-    "opus": ("opus", "claude-opus-4-8"),
-    "fable": ("fable", "claude-fable-5"),
-    # Legacy display names (pre-verbatim picker).
-    "Fable 5": ("fable", "claude-fable-5"),
-    "Opus 4.8": ("opus", "claude-opus-4-8"),
-    "Sonnet 5": ("sonnet", "claude-sonnet-5"),
-    "Haiku 4.5": ("haiku", "claude-haiku-4-5-20251001"),
-    "Sonnet 4.6": ("sonnet",),
-}
 FALLBACK_MODELS = DEFAULT_MODELS
 MODEL_OWNER = "anthropic-claude-code"
 # Cheap/fast model Hermes should use for auxiliary work (vision summaries,
@@ -214,12 +195,6 @@ class Config:
         # harness-detection bug where "hermes"-named git content in the
         # gathered context flipped sessions to extra-usage billing.
         return self.run_dir / "workdir"
-
-    @property
-    def models_cache_file(self) -> Path:
-        # Written by `hermes-claude-code models --probe --apply`; read by the
-        # proxy's /v1/models (see models_probe.effective_models).
-        return self.run_dir / "hermes-claude-code.models.json"
 
     @property
     def log_file(self) -> Path:
