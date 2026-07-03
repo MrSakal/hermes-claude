@@ -81,5 +81,3 @@ uv run pytest
 - **[AGENTS.md](AGENTS.md)** — step-by-step install/verify/troubleshoot guide
   written for an AI agent to follow (also useful for a human who wants that
   level of detail, e.g. headless/server installs).
-- **[REVIEW_AND_PLAN.md](REVIEW_AND_PLAN.md)** — engineering notes on what was
-  verified against Hermes' real source and why each design choice was made.

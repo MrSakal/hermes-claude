@@ -223,6 +223,38 @@ class Conversation:
     )
 
 
+def usage_to_openai(usage: Any) -> dict[str, int] | None:
+    """Normalise Claude Code usage into the OpenAI ``usage`` object.
+
+    Claude Code reports Anthropic-style counters (``input_tokens``,
+    ``output_tokens``, plus cache read/creation splits). Hermes consumes the
+    OpenAI shape, and its context/cost accounting needs prompt tokens to
+    include the cached share — so the cache counters fold into
+    ``prompt_tokens``. Returns None for empty/unknown shapes so callers can
+    distinguish "no data" from a genuine zero-token response.
+    """
+    if not isinstance(usage, dict):
+        return None
+
+    def _count(key: str) -> int:
+        value = usage.get(key)
+        return int(value) if isinstance(value, (int, float)) else 0
+
+    prompt = (
+        _count("input_tokens")
+        + _count("cache_creation_input_tokens")
+        + _count("cache_read_input_tokens")
+    )
+    completion = _count("output_tokens")
+    if prompt == 0 and completion == 0:
+        return None
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion,
+    }
+
+
 @dataclass
 class BridgeResult:
     text: str = ""
@@ -231,6 +263,8 @@ class BridgeResult:
     session_id: str | None = None
     backend: str = "sdk"
     reasoning_content: str = ""
+    # OpenAI-shaped usage from the backend, or None when unreported.
+    usage: dict[str, int] | None = None
 
     @property
     def has_tool_calls(self) -> bool:
@@ -265,6 +299,7 @@ class BridgeResult:
             session_id=self.session_id,
             backend=self.backend,
             reasoning_content=self.reasoning_content,
+            usage=self.usage,
         )
 
 
@@ -432,6 +467,7 @@ def apply_tool_choice(conv: "Conversation", result: "BridgeResult") -> "BridgeRe
             session_id=result.session_id,
             backend=result.backend,
             reasoning_content=result.reasoning_content,
+            usage=result.usage,
         )
     if kind == "function" and name and result.tool_calls:
         kept = [
@@ -448,6 +484,7 @@ def apply_tool_choice(conv: "Conversation", result: "BridgeResult") -> "BridgeRe
             session_id=result.session_id,
             backend=result.backend,
             reasoning_content=result.reasoning_content,
+            usage=result.usage,
         )
     return result
 
@@ -572,6 +609,7 @@ def _recover_host_tool_call(conv: Conversation, result: BridgeResult) -> BridgeR
         session_id=result.session_id,
         backend=result.backend,
         reasoning_content=result.reasoning_content,
+        usage=result.usage,
     )
 
 
@@ -734,6 +772,7 @@ class ClaudeBridge:
             "finish_reason": result.finish_reason,
             "tool_calls": result.tool_calls,
             "session_id": result.session_id,
+            "usage": result.usage,
         }
 
     # -- SDK backend ------------------------------------------------------- #
@@ -802,6 +841,7 @@ class ClaudeBridge:
         tool_calls: list[dict[str, Any]] = []
         session_id: str | None = None
         result_text: str | None = None
+        usage: dict[str, int] | None = None
 
         try:
             async for message in query(prompt=conv.prompt, options=options):
@@ -828,6 +868,7 @@ class ClaudeBridge:
                 elif isinstance(message, ResultMessage):
                     session_id = message.session_id
                     result_text = message.result
+                    usage = usage_to_openai(getattr(message, "usage", None))
                     if message.is_error:
                         raise ClaudeCodeAPIError(
                             result_text or "Claude Code SDK error",
@@ -847,6 +888,7 @@ class ClaudeBridge:
             session_id=session_id,
             backend="sdk",
             reasoning_content="".join(reasoning_parts),
+            usage=usage,
         )
         result = result.with_captured_tool_calls(captured, mode=conv.mode)
         result = _recover_host_tool_call(conv, result)
@@ -868,6 +910,7 @@ class ClaudeBridge:
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
         result_text: str | None = None
+        usage: dict[str, int] | None = None
 
         try:
             async for message in query(prompt=conv.prompt, options=options):
@@ -896,6 +939,7 @@ class ClaudeBridge:
                 elif isinstance(message, ResultMessage):
                     session_id = message.session_id
                     result_text = message.result
+                    usage = usage_to_openai(getattr(message, "usage", None))
                     if message.is_error:
                         raise ClaudeCodeAPIError(
                             result_text or "Claude Code SDK error",
@@ -912,6 +956,7 @@ class ClaudeBridge:
             session_id=session_id,
             backend="sdk",
             reasoning_content="".join(reasoning_parts),
+            usage=usage,
         ).with_captured_tool_calls(captured, mode=conv.mode)
         result = _recover_host_tool_call(conv, result)
         result = apply_tool_choice(conv, result)
@@ -924,6 +969,7 @@ class ClaudeBridge:
             "tool_calls": result.tool_calls,
             "session_id": result.session_id,
             "reasoning_content": result.reasoning_content,
+            "usage": result.usage,
         }
 
     # -- CLI backend ------------------------------------------------------- #
@@ -963,6 +1009,7 @@ class ClaudeBridge:
 
         text = out.decode("utf-8", "replace").strip()
         session_id = None
+        usage: dict[str, int] | None = None
         try:
             data = json.loads(text)
             if isinstance(data, dict):
@@ -972,6 +1019,7 @@ class ClaudeBridge:
                     raise ClaudeCodeAPIError(message, data.get("api_error_status"))
                 text = data.get("result", text)
                 session_id = data.get("session_id")
+                usage = usage_to_openai(data.get("usage"))
         except json.JSONDecodeError:
             pass
         _raise_if_claude_api_error(text)
@@ -980,4 +1028,5 @@ class ClaudeBridge:
             finish_reason="stop",
             session_id=session_id,
             backend="cli",
+            usage=usage,
         )
