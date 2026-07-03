@@ -343,3 +343,55 @@ def test_stream_preserves_sdk_api_error_without_complete_fallback(monkeypatch):
         asyncio.run(run())
 
     assert exc_info.value.status_code == 401
+
+
+# --------------------------------------------------------------------------- #
+# Graceful partial + rich error detail (v0.3.1)
+# --------------------------------------------------------------------------- #
+def test_errored_result_with_text_is_tolerated(monkeypatch):
+    # The claude_code preset sometimes ends a good answer in an error state
+    # (e.g. a stray tool attempt). If the model produced text, deliver it.
+    from claude_agent_sdk import TextBlock
+
+    async def fake_query(*, prompt, options):
+        yield _assistant_msg(content=[TextBlock(text="here is the answer")])
+        yield _result_msg(is_error=True, subtype="error_during_execution", result="")
+
+    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+
+    result = asyncio.run(ClaudeBridge(Config())._complete_sdk(_conv()))
+    assert result.text == "here is the answer"
+    assert result.finish_reason == "stop"
+
+
+def test_errored_result_without_content_surfaces_detail(monkeypatch):
+    # No usable content → raise, but with the REAL cause, not the opaque
+    # "Claude Code SDK error".
+    async def fake_query(*, prompt, options):
+        yield _result_msg(
+            is_error=True,
+            result="",
+            subtype="error_during_execution",
+            stop_reason="tool_use",
+            permission_denials=[{"tool": "TodoWrite"}],
+        )
+
+    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+
+    with pytest.raises(ClaudeCodeAPIError) as exc_info:
+        asyncio.run(ClaudeBridge(Config())._complete_sdk(_conv()))
+
+    msg = str(exc_info.value)
+    assert "error_during_execution" in msg
+    assert "TodoWrite" in msg
+    assert msg != "Claude Code SDK error"
+
+
+def test_no_tools_path_steers_model_away_from_tools():
+    from hermes_claude_code.bridge import prepare_conversation
+
+    conv = prepare_conversation(
+        {"messages": [{"role": "user", "content": "hi"}]}, Config()
+    )
+    options, _ = ClaudeBridge(Config())._build_options(conv)
+    assert "No tools are available" in options.system_prompt["append"]
