@@ -400,6 +400,31 @@ def _proxy_version_current(health: dict[str, Any] | None) -> bool:
     return bool(health) and str(health.get("version") or "") == __version__
 
 
+def _version_tuple(value: Any) -> tuple[int, ...]:
+    """Parse '0.3.1' → (0, 3, 1); unparseable/missing → (0,) (oldest)."""
+    parts: list[int] = []
+    for piece in str(value or "").strip().split("."):
+        try:
+            parts.append(int(piece))
+        except ValueError:
+            break
+    return tuple(parts) or (0,)
+
+
+def _proxy_outdated(health: dict[str, Any] | None) -> bool:
+    """True when a healthy proxy runs an OLDER version than this package.
+
+    Strictly older — a NEWER running proxy must be left alone. Verified live:
+    two Python environments on one machine, one still carrying an old plugin,
+    ping-ponged proxy replacements ("replacing stale proxy (running=0.3.1,
+    installed=0.2.3)") — the outdated side kept killing the current proxy and
+    serving requests through old code.
+    """
+    if not health:
+        return False
+    return _version_tuple(health.get("version")) < _version_tuple(__version__)
+
+
 def ensure_proxy_running(config: Config | None = None) -> dict[str, Any]:
     """Start the proxy if not already healthy AND current. Returns a status dict."""
     import subprocess
@@ -409,12 +434,12 @@ def ensure_proxy_running(config: Config | None = None) -> dict[str, Any]:
 
     existing = health_check(cfg)
     if existing is not None:
-        if _proxy_version_current(existing):
+        if not _proxy_outdated(existing):
             return {"status": "already-running", "health": existing, "port": cfg.port}
-        # Stale proxy from a previous install — replace it so the upgrade
-        # actually takes effect.
+        # Proxy from an older install — replace it so the upgrade actually
+        # takes effect. (Never the other way around: see _proxy_outdated.)
         logger.info(
-            "replacing stale proxy (running=%s, installed=%s)",
+            "replacing outdated proxy (running=%s, installed=%s)",
             existing.get("version"), __version__,
         )
         stop_proxy(cfg)
