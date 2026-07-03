@@ -19,7 +19,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, AsyncIterable, AsyncIterator
 
 from . import mcp_server
-from .config import BACKEND_CANDIDATES, Config, MODEL_ID_ALIASES, get_config
+from .config import Config, MODEL_ID_ALIASES, get_config
 
 logger = logging.getLogger("hermes_claude_code.bridge")
 
@@ -312,16 +312,6 @@ class ClaudeCodeAPIError(RuntimeError):
     def __init__(self, message: str, status_code: int | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code
-
-
-def _is_extra_usage_error(exc: BaseException) -> bool:
-    """True for Anthropic's "You're out of extra usage" rejection.
-
-    That error means "this selector is not plan-covered on this route", which
-    is exactly the case the candidate-selector fallback can fix — unlike
-    auth/ratelimit/server errors, which must propagate untouched.
-    """
-    return "extra usage" in str(exc).lower()
 
 
 def _raise_if_claude_api_error(text: str | None, status_code: int | None = None) -> None:
@@ -639,19 +629,6 @@ def prepare_conversation(payload: dict[str, Any], config: Config) -> Conversatio
         if effort not in _VALID_EFFORTS:
             warnings.append(f"unknown reasoning effort '{effort}' ignored")
             effort = None
-    if effort is not None:
-        # The self-healing fallback may have learned that adaptive
-        # effort/thinking options flip requests to extra-usage billing on
-        # this subscription route — drop them up front in that case.
-        from .models_probe import effort_allowed
-
-        if not effort_allowed(config):
-            warnings.append(
-                "adaptive effort disabled: rejected as extra usage on this "
-                "subscription route"
-            )
-            effort = None
-
     if payload.get("temperature") is not None:
         warnings.append("temperature is best-effort; Claude Code may ignore it")
     if payload.get("max_tokens") is not None:
@@ -659,19 +636,12 @@ def prepare_conversation(payload: dict[str, Any], config: Config) -> Conversatio
 
     requested_model = str(payload.get("model") or config.models[0])
 
-    # Prefer the selector the model probe proved to work on this
-    # subscription/route (e.g. Fable may only be plan-covered via its full
-    # ID over the SDK); fall back to the static alias mapping.
-    from .models_probe import backend_overrides
-
-    backend_model = (
-        backend_overrides(config).get(requested_model)
-        or MODEL_ID_ALIASES.get(requested_model, requested_model)
-    )
-
     return Conversation(
         model=requested_model,
-        backend_model=backend_model,
+        # Verbatim pass-through; MODEL_ID_ALIASES only maps legacy display
+        # names from configs saved before the picker switched to native
+        # selector names.
+        backend_model=MODEL_ID_ALIASES.get(requested_model, requested_model),
         system_prompt=system_prompt,
         prompt=prompt,
         tools=payload.get("tools") or [],
@@ -780,132 +750,8 @@ class ClaudeBridge:
             env.pop(var, None)
         return env
 
-    # -- subscription self-healing ------------------------------------------ #
-    def _fallback_attempts(self, conv: Conversation) -> list[Conversation]:
-        """Request variants to try when the original hits the extra-usage wall.
-
-        Two independent axes are known to flip a request from plan-billed to
-        extra-usage: the model selector spelling (alias vs pinned ID) and the
-        adaptive ``effort``/``thinking`` options. Try the cheap single-change
-        variants first, then the combinations.
-        """
-        attempts: list[Conversation] = []
-        if conv.effort:
-            attempts.append(replace(conv, effort=None))
-        for backend in BACKEND_CANDIDATES.get(conv.model, ()):
-            if backend == conv.backend_model:
-                continue
-            attempts.append(replace(conv, backend_model=backend))
-            if conv.effort:
-                attempts.append(replace(conv, backend_model=backend, effort=None))
-        return attempts
-
-    def _record_working_variant(
-        self, original: Conversation, served: Conversation
-    ) -> None:
-        try:
-            if served.backend_model != original.backend_model:
-                from .models_probe import record_backend_override
-
-                record_backend_override(
-                    self.config, original.model, served.backend_model
-                )
-                logger.info(
-                    "self-heal: '%s' now routes via '%s' (was '%s')",
-                    original.model, served.backend_model, original.backend_model,
-                )
-            if original.effort and not served.effort:
-                from .models_probe import record_effort_unsupported
-
-                record_effort_unsupported(self.config)
-                logger.info(
-                    "self-heal: adaptive effort/thinking disabled — requests "
-                    "with it were rejected as extra usage"
-                )
-        except Exception:  # never fail a served request over bookkeeping
-            pass
-
-    def _record_unavailable(self, conv: Conversation) -> None:
-        try:
-            from .models_probe import record_model_unavailable
-
-            record_model_unavailable(self.config, conv.model)
-            logger.warning(
-                "self-heal: '%s' not plan-covered under any selector; "
-                "hiding it from the picker", conv.model,
-            )
-        except Exception:
-            pass
-
     # -- public API -------------------------------------------------------- #
     async def complete(self, conv: Conversation) -> BridgeResult:
-        """One completion, self-healing across candidate model selectors.
-
-        Which selector a subscription serves is server-side policy (a Team
-        plan served interactive ``claude-fable-5`` but rejected SDK ``fable``
-        with "out of extra usage"). When the primary selector hits that wall,
-        retry the same request with the remaining ``BACKEND_CANDIDATES`` and
-        persist whichever works, so the discovery happens automatically on
-        first use instead of requiring a manual probe.
-        """
-        try:
-            return await self._complete_once(conv)
-        except ClaudeCodeAPIError as exc:
-            if not _is_extra_usage_error(exc) or not isinstance(conv.prompt, str):
-                raise
-            for attempt in self._fallback_attempts(conv):
-                try:
-                    result = await self._complete_once(attempt)
-                except ClaudeCodeAPIError as exc2:
-                    if _is_extra_usage_error(exc2):
-                        continue
-                    raise
-                self._record_working_variant(conv, attempt)
-                return result
-            self._record_unavailable(conv)
-            raise
-
-    async def stream(self, conv: Conversation) -> AsyncIterator[dict[str, Any]]:
-        """Yield ``{'type': 'text'|'done', ...}`` events (self-healing).
-
-        Same candidate-selector fallback as :meth:`complete`. Retrying is only
-        safe while nothing has been emitted downstream; an extra-usage 400
-        surfaces on the first assistant event, before any content, so in
-        practice the fallback always gets its chance.
-        """
-        yielded = False
-        try:
-            async for evt in self._stream_once(conv):
-                yielded = True
-                yield evt
-            return
-        except ClaudeCodeAPIError as exc:
-            if (
-                yielded
-                or not _is_extra_usage_error(exc)
-                or not isinstance(conv.prompt, str)
-            ):
-                raise
-            for attempt in self._fallback_attempts(conv):
-                emitted = False
-                try:
-                    async for evt in self._stream_once(attempt):
-                        if not emitted:
-                            # First event out means this variant serves the
-                            # request — persist it before streaming onward.
-                            self._record_working_variant(conv, attempt)
-                            emitted = True
-                        yield evt
-                    if emitted:
-                        return
-                except ClaudeCodeAPIError as exc2:
-                    if emitted or not _is_extra_usage_error(exc2):
-                        raise
-                    continue
-            self._record_unavailable(conv)
-            raise
-
-    async def _complete_once(self, conv: Conversation) -> BridgeResult:
         if sdk_available():
             try:
                 return await self._complete_sdk(conv)
@@ -927,7 +773,8 @@ class ClaudeBridge:
             "@anthropic-ai/claude-code"
         )
 
-    async def _stream_once(self, conv: Conversation) -> AsyncIterator[dict[str, Any]]:
+    async def stream(self, conv: Conversation) -> AsyncIterator[dict[str, Any]]:
+        """Yield ``{'type': 'text'|'done', ...}`` events."""
         if sdk_available():
             try:
                 async for evt in self._stream_sdk(conv):
@@ -940,7 +787,7 @@ class ClaudeBridge:
             except Exception:  # pragma: no cover - exercised live
                 pass
         # Fallback: produce the full result, then emit it as a single chunk.
-        result = await self._complete_once(conv)
+        result = await self.complete(conv)
         if result.reasoning_content:
             yield {"type": "reasoning", "text": result.reasoning_content}
         if result.text:

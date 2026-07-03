@@ -39,27 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("stop", help="Stop the local proxy")
     d = sub.add_parser("doctor", help="Diagnose dependencies/auth/proxy")
     d.add_argument("--live", action="store_true", help="Send a trivial live completion")
-    m = sub.add_parser(
-        "models",
-        help="List models; --probe tests which ones your subscription covers",
-    )
-    m.add_argument(
-        "--probe",
-        action="store_true",
-        help="Send a one-line completion per model and report which work "
-        "on this subscription (vs. billing extra usage)",
-    )
-    m.add_argument(
-        "--apply",
-        action="store_true",
-        help="With --probe: save the working set so the picker only offers "
-        "models that work (cleared with --reset)",
-    )
-    m.add_argument(
-        "--reset",
-        action="store_true",
-        help="Delete the saved working set and go back to the full default list",
-    )
+    sub.add_parser("models", help="List the models the picker offers")
     args = parser.parse_args(argv)
 
     cfg = get_config()
@@ -96,39 +76,7 @@ def main(argv: list[str] | None = None) -> int:
         print(format_report(report))
         return 0 if report["ok"] else 1
     if action == "models":
-        from .models_probe import (
-            STATUS_OK,
-            clear_models_cache,
-            effective_models,
-            format_probe_results,
-            probe_models,
-            write_models_cache,
-        )
-
-        if getattr(args, "reset", False):
-            cleared = clear_models_cache(cfg)
-            print("working-set cache cleared" if cleared else "no cache to clear")
-            return 0
-        if getattr(args, "probe", False):
-            ensure_proxy_running(cfg)
-            # Probe the FULL configured list (not the possibly-narrowed
-            # effective list) so models that started working — e.g. after a
-            # plan upgrade — can re-enter the working set.
-            results = probe_models(cfg)
-            print(format_probe_results(results))
-            working = [r["model"] for r in results if r["status"] == STATUS_OK]
-            if getattr(args, "apply", False):
-                if working:
-                    write_models_cache(cfg, results)
-                    print(
-                        "\nSaved. The picker now offers only these models, "
-                        "each routed through its proven selector "
-                        "(reset with `hermes-claude-code models --reset`)."
-                    )
-                else:
-                    print("\nNothing saved — no model worked.")
-            return 0 if working else 1
-        print(json.dumps({"models": list(effective_models(cfg))}, indent=2))
+        print(json.dumps({"models": list(cfg.models)}, indent=2))
         return 0
 
     print(json.dumps(proxy_status(cfg), indent=2))

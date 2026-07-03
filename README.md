@@ -43,33 +43,17 @@ Or just pick it interactively with `hermes model`.
 
 ## Which models can I pick?
 
-Which models your subscription serves — and under which selector — is decided
-server-side per plan and per route, and can't be predicted (e.g. a Team plan
-was seen serving `claude-fable-5` interactively while rejecting `fable` over
-the SDK with "out of extra usage"). The plugin handles this **automatically**:
+The picker offers Claude Code's own model selectors **verbatim** —
+`sonnet`, `haiku`, `opus`, `fable` — and sends exactly what you pick to the
+backend, with no name translation or automatic rerouting in between. Which
+of them your subscription actually serves is decided server-side per plan;
+if one is rejected, you see the real error. Customize the list with
+`HERMES_CLAUDE_CODE_MODELS` (raw selectors like `sonnet[1m]` and `opusplan`
+work too). `hermes-claude-code models` (or `/claude-code models` in-session)
+prints the current list.
 
-- When a request is rejected with "out of extra usage", the bridge instantly
-  retries the same request with the model's other known selectors (alias ↔
-  current full ID) and, if reasoning effort was requested, without the
-  adaptive effort/thinking options — both are known billing triggers. If a
-  variant works, the response is served normally and the discovery is
-  remembered — you see nothing but a slightly slower first message.
-- If *no* variant works, the error is returned once and the model is
-  removed from the picker, so you can't stumble into it again.
-- After a plugin upgrade, a still-running old proxy is detected by version
-  and replaced automatically — no manual stop/start needed.
-
-No manual steps required. Optional controls:
-
-```bash
-hermes-claude-code models                  # show the current effective list
-hermes-claude-code models --probe --apply  # test everything up front instead
-hermes-claude-code models --reset          # forget learned state, full list again
-```
-
-The probe is also available in-session as `/claude-code models`. Re-run
-`--reset` (or the probe) after a plan change so hidden models get another
-chance.
+After a plugin upgrade, a still-running old proxy is detected by version and
+replaced automatically — no manual stop/start needed.
 
 ## Managing the proxy
 
