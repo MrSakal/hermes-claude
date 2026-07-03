@@ -50,11 +50,14 @@ the SDK with "out of extra usage"). The plugin handles this **automatically**:
 
 - When a request is rejected with "out of extra usage", the bridge instantly
   retries the same request with the model's other known selectors (alias ↔
-  current full ID). If one works, the response is served normally and the
-  working selector is remembered — you see nothing but a slightly slower
-  first message.
-- If *no* selector works, the error is returned once and the model is
+  current full ID) and, if reasoning effort was requested, without the
+  adaptive effort/thinking options — both are known billing triggers. If a
+  variant works, the response is served normally and the discovery is
+  remembered — you see nothing but a slightly slower first message.
+- If *no* variant works, the error is returned once and the model is
   removed from the picker, so you can't stumble into it again.
+- After a plugin upgrade, a still-running old proxy is detected by version
+  and replaced automatically — no manual stop/start needed.
 
 No manual steps required. Optional controls:
 

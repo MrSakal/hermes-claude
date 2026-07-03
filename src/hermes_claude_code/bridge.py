@@ -639,6 +639,18 @@ def prepare_conversation(payload: dict[str, Any], config: Config) -> Conversatio
         if effort not in _VALID_EFFORTS:
             warnings.append(f"unknown reasoning effort '{effort}' ignored")
             effort = None
+    if effort is not None:
+        # The self-healing fallback may have learned that adaptive
+        # effort/thinking options flip requests to extra-usage billing on
+        # this subscription route — drop them up front in that case.
+        from .models_probe import effort_allowed
+
+        if not effort_allowed(config):
+            warnings.append(
+                "adaptive effort disabled: rejected as extra usage on this "
+                "subscription route"
+            )
+            effort = None
 
     if payload.get("temperature") is not None:
         warnings.append("temperature is best-effort; Claude Code may ignore it")
@@ -743,23 +755,47 @@ class ClaudeBridge:
         return env
 
     # -- subscription self-healing ------------------------------------------ #
-    def _fallback_backends(self, conv: Conversation) -> list[str]:
-        """Untried candidate selectors for the requested display model."""
-        return [
-            c
-            for c in BACKEND_CANDIDATES.get(conv.model, ())
-            if c != conv.backend_model
-        ]
+    def _fallback_attempts(self, conv: Conversation) -> list[Conversation]:
+        """Request variants to try when the original hits the extra-usage wall.
 
-    def _record_working_backend(self, conv: Conversation, backend: str) -> None:
+        Two independent axes are known to flip a request from plan-billed to
+        extra-usage: the model selector spelling (alias vs pinned ID) and the
+        adaptive ``effort``/``thinking`` options. Try the cheap single-change
+        variants first, then the combinations.
+        """
+        attempts: list[Conversation] = []
+        if conv.effort:
+            attempts.append(replace(conv, effort=None))
+        for backend in BACKEND_CANDIDATES.get(conv.model, ()):
+            if backend == conv.backend_model:
+                continue
+            attempts.append(replace(conv, backend_model=backend))
+            if conv.effort:
+                attempts.append(replace(conv, backend_model=backend, effort=None))
+        return attempts
+
+    def _record_working_variant(
+        self, original: Conversation, served: Conversation
+    ) -> None:
         try:
-            from .models_probe import record_backend_override
+            if served.backend_model != original.backend_model:
+                from .models_probe import record_backend_override
 
-            record_backend_override(self.config, conv.model, backend)
-            logger.info(
-                "self-heal: '%s' now routes via '%s' (was '%s')",
-                conv.model, backend, conv.backend_model,
-            )
+                record_backend_override(
+                    self.config, original.model, served.backend_model
+                )
+                logger.info(
+                    "self-heal: '%s' now routes via '%s' (was '%s')",
+                    original.model, served.backend_model, original.backend_model,
+                )
+            if original.effort and not served.effort:
+                from .models_probe import record_effort_unsupported
+
+                record_effort_unsupported(self.config)
+                logger.info(
+                    "self-heal: adaptive effort/thinking disabled — requests "
+                    "with it were rejected as extra usage"
+                )
         except Exception:  # never fail a served request over bookkeeping
             pass
 
@@ -791,16 +827,14 @@ class ClaudeBridge:
         except ClaudeCodeAPIError as exc:
             if not _is_extra_usage_error(exc) or not isinstance(conv.prompt, str):
                 raise
-            for backend in self._fallback_backends(conv):
+            for attempt in self._fallback_attempts(conv):
                 try:
-                    result = await self._complete_once(
-                        replace(conv, backend_model=backend)
-                    )
+                    result = await self._complete_once(attempt)
                 except ClaudeCodeAPIError as exc2:
                     if _is_extra_usage_error(exc2):
                         continue
                     raise
-                self._record_working_backend(conv, backend)
+                self._record_working_variant(conv, attempt)
                 return result
             self._record_unavailable(conv)
             raise
@@ -826,15 +860,14 @@ class ClaudeBridge:
                 or not isinstance(conv.prompt, str)
             ):
                 raise
-            for backend in self._fallback_backends(conv):
-                alt = replace(conv, backend_model=backend)
+            for attempt in self._fallback_attempts(conv):
                 emitted = False
                 try:
-                    async for evt in self._stream_once(alt):
+                    async for evt in self._stream_once(attempt):
                         if not emitted:
-                            # First event out means this selector serves the
+                            # First event out means this variant serves the
                             # request — persist it before streaming onward.
-                            self._record_working_backend(conv, backend)
+                            self._record_working_variant(conv, attempt)
                             emitted = True
                         yield evt
                     if emitted:
