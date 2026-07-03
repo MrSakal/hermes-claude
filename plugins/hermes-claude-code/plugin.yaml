@@ -1,6 +1,6 @@
 name: hermes-claude-code
 kind: standalone
-version: "0.2.2"
+version: "0.2.3"
 description: "Claude Code via local OpenAI-compatible Hermes bridge"
 author: Nous Research
 provides_hooks:
