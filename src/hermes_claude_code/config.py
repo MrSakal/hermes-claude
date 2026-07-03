@@ -41,7 +41,7 @@ DEFAULT_PORT = 35345
 DEFAULT_MODELS = (
     "Fable 5",
     "Opus 4.8",
-    "Sonnet 4.6",
+    "Sonnet 5",
     "Haiku 4.5",
 )
 # Claude Code needs CLI/API selector values, not human display names.
@@ -55,8 +55,11 @@ DEFAULT_MODELS = (
 MODEL_ID_ALIASES = {
     "Fable 5": "fable",
     "Opus 4.8": "opus",
-    "Sonnet 4.6": "sonnet",
+    "Sonnet 5": "sonnet",
     "Haiku 4.5": "haiku",
+    # Back-compat: sessions/configs saved before the Sonnet 5 rename still
+    # send the old display name; keep it routed to the same alias.
+    "Sonnet 4.6": "sonnet",
 }
 FALLBACK_MODELS = DEFAULT_MODELS
 MODEL_OWNER = "anthropic-claude-code"
@@ -114,6 +117,21 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_models(name: str, default: tuple) -> tuple:
+    """Parse a comma-separated model list from the environment.
+
+    Entries can be display names from ``MODEL_ID_ALIASES`` (mapped to Claude
+    Code aliases by the bridge) or raw Claude Code selectors passed through
+    verbatim — e.g. ``sonnet[1m]``, ``opusplan``, or a pinned model ID (the
+    latter bills as extra usage, so only use one deliberately).
+    """
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    models = tuple(m.strip() for m in raw.split(",") if m.strip())
+    return models or default
+
+
 @dataclass
 class Config:
     """Resolved runtime configuration for proxy + bridge."""
@@ -169,4 +187,5 @@ def get_config() -> Config:
         request_timeout=_env_float("HERMES_CLAUDE_CODE_TIMEOUT", 600.0),
         startup_timeout=_env_float("HERMES_CLAUDE_CODE_STARTUP_TIMEOUT", 30.0),
         force_subscription=_env_bool("HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION", False),
+        models=_env_models("HERMES_CLAUDE_CODE_MODELS", DEFAULT_MODELS),
     )

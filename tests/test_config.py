@@ -38,3 +38,32 @@ def test_non_windows_default_is_dot_hermes(monkeypatch):
     monkeypatch.delenv("HERMES_HOME", raising=False)
     monkeypatch.setattr("sys.platform", "linux")
     assert hermes_home() == Path.home() / ".hermes"
+
+
+def test_models_env_override_and_default(monkeypatch):
+    from hermes_claude_code.config import DEFAULT_MODELS, get_config
+
+    monkeypatch.delenv("HERMES_CLAUDE_CODE_MODELS", raising=False)
+    assert get_config().models == DEFAULT_MODELS
+
+    monkeypatch.setenv(
+        "HERMES_CLAUDE_CODE_MODELS", "Sonnet 5, sonnet[1m] ,opusplan,"
+    )
+    assert get_config().models == ("Sonnet 5", "sonnet[1m]", "opusplan")
+
+    # Whitespace-only value falls back to the defaults instead of an empty picker.
+    monkeypatch.setenv("HERMES_CLAUDE_CODE_MODELS", " , ")
+    assert get_config().models == DEFAULT_MODELS
+
+
+def test_custom_model_entries_pass_through_to_backend(monkeypatch):
+    # Raw Claude Code selectors from HERMES_CLAUDE_CODE_MODELS (no display
+    # alias) must reach the backend verbatim.
+    from hermes_claude_code.bridge import prepare_conversation
+    from hermes_claude_code.config import Config
+
+    conv = prepare_conversation(
+        {"model": "sonnet[1m]", "messages": [{"role": "user", "content": "x"}]},
+        Config(),
+    )
+    assert conv.backend_model == "sonnet[1m]"
