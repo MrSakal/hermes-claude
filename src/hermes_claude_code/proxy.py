@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import signal
+import sys
 import time
 import uuid
 from typing import Any
@@ -351,6 +352,31 @@ def _read_pid(config: Config) -> int | None:
 
 
 def _pid_alive(pid: int) -> bool:
+    """Return True when *pid* is a live process.
+
+    ``os.kill(pid, 0)`` is the POSIX idiom, but on Windows signal 0 is
+    CTRL_C_EVENT and the call fails with ``WinError 87`` (surfacing as
+    ``SystemError`` on some CPython builds) instead of probing liveness —
+    seen live: it broke ``stop``/``status`` for every real PID. Probe via
+    the Win32 API there instead.
+    """
+    if sys.platform == "win32":
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid)
+        )
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            return bool(ok) and code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
         return True

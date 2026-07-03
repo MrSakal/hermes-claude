@@ -78,3 +78,19 @@ def test_proxy_start_stop_smoke(monkeypatch, tmp_path):
         assert any(m["id"] == "Sonnet 4.6" for m in resp.json()["data"])
     finally:
         proxy.stop_proxy(cfg)
+
+
+def test_pid_alive_works_on_this_platform():
+    # Regression: on Windows, os.kill(pid, 0) is CTRL_C_EVENT and fails with
+    # WinError 87 (sometimes surfacing as SystemError) instead of probing the
+    # process — which broke stop/status for every live PID. _pid_alive must
+    # answer without raising on every platform.
+    import os
+    import subprocess
+    import sys
+
+    assert proxy._pid_alive(os.getpid()) is True
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    assert proxy._pid_alive(proc.pid) is False

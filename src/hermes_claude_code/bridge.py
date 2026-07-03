@@ -698,12 +698,6 @@ Hermes host tool protocol:
 """.strip()
 
 
-def _append_system_prompt(existing: str | None, addition: str) -> str:
-    if existing:
-        return f"{existing}\n\n{addition}"
-    return addition
-
-
 class ClaudeBridge:
     """Drives Claude Code via the SDK, falling back to the ``claude`` CLI."""
 
@@ -783,8 +777,17 @@ class ClaudeBridge:
         backend_env = self._backend_env()
         if backend_env is not None:
             kwargs["env"] = backend_env
+        # SUBSCRIPTION-CRITICAL: keep Claude Code's own system prompt (the
+        # ``claude_code`` preset) and APPEND Hermes' prompt to it, never
+        # replace it. Replacing the system prompt outright makes Anthropic's
+        # server classify the request as third-party/SDK traffic, which bills
+        # against "extra usage" credits instead of the Pro/Max/Team
+        # subscription allowance — observed live as
+        # ``API Error: 400 You're out of extra usage``. This mirrors what the
+        # CLI fallback already does with ``--append-system-prompt``.
+        system_appends: list[str] = []
         if conv.system_prompt:
-            kwargs["system_prompt"] = conv.system_prompt
+            system_appends.append(conv.system_prompt)
         if conv.cwd:
             kwargs["cwd"] = conv.cwd
         if conv.effort:
@@ -804,14 +807,11 @@ class ClaudeBridge:
             if conv.mode == "strict":
                 kwargs["max_turns"] = 1
             kwargs["allowed_tools"] = allowed
-            system = _append_system_prompt(
-                kwargs.get("system_prompt"), _HERMES_TOOL_SYSTEM_PROMPT
-            )
+            system_appends.append(_HERMES_TOOL_SYSTEM_PROMPT)
             kind, name = normalize_tool_choice(conv.tool_choice)
             directive = _tool_choice_directive(kind, name)
             if directive:
-                system = _append_system_prompt(system, directive)
-            kwargs["system_prompt"] = system
+                system_appends.append(directive)
         else:
             # No Hermes tools to expose — either none were requested, or
             # tool_choice="none" suppressed them. Explicitly disable Claude
@@ -823,6 +823,11 @@ class ClaudeBridge:
             # set — headless, that risks Claude Code hanging on a
             # tool-approval prompt nobody can answer.
             kwargs["tools"] = []
+
+        preset: dict[str, Any] = {"type": "preset", "preset": "claude_code"}
+        if system_appends:
+            preset["append"] = "\n\n".join(system_appends)
+        kwargs["system_prompt"] = preset
         return ClaudeAgentOptions(**kwargs), captured
 
     async def _complete_sdk(self, conv: Conversation) -> BridgeResult:

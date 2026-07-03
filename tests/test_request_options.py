@@ -99,8 +99,38 @@ def test_sdk_options_keep_hermes_tools_host_delegated():
     assert options.permission_mode == "dontAsk"
     assert options.allowed_tools == ["mcp__hermes-tools__web_search"]
     assert options.max_turns == 1
-    assert isinstance(options.system_prompt, str)
-    assert "Never ask the user to enable WebFetch" in options.system_prompt
+    # Subscription-critical shape: the claude_code preset must stay, with
+    # Hermes' additions appended — replacing the system prompt outright makes
+    # Anthropic bill the request as extra usage instead of the subscription.
+    assert isinstance(options.system_prompt, dict)
+    assert options.system_prompt.get("type") == "preset"
+    assert options.system_prompt.get("preset") == "claude_code"
+    assert "Never ask the user to enable WebFetch" in options.system_prompt["append"]
+
+
+def test_sdk_options_always_use_claude_code_preset_system_prompt():
+    # Regression guard for subscription billing: every SDK call must keep the
+    # claude_code preset system prompt. Seen live without it:
+    # "API Error: 400 You're out of extra usage" — the request was billed as
+    # third-party traffic instead of the user's Claude subscription.
+    plain = prepare_conversation(
+        {"messages": [{"role": "user", "content": "hi"}]}, Config()
+    )
+    options, _ = ClaudeBridge(Config())._build_options(plain)
+    assert options.system_prompt == {"type": "preset", "preset": "claude_code"}
+
+    with_system = prepare_conversation(
+        {
+            "messages": [
+                {"role": "system", "content": "You are Hermes."},
+                {"role": "user", "content": "hi"},
+            ]
+        },
+        Config(),
+    )
+    options, _ = ClaudeBridge(Config())._build_options(with_system)
+    assert options.system_prompt.get("preset") == "claude_code"
+    assert "You are Hermes." in options.system_prompt["append"]
 
 
 def test_effort_invalid_ignored_with_warning():
