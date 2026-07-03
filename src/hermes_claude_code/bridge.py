@@ -451,12 +451,12 @@ def effective_tools(conv: "Conversation") -> list[dict[str, Any]]:
 def _tool_choice_directive(kind: str, name: str | None) -> str | None:
     if kind == "required":
         return (
-            "You MUST call one of the available Hermes MCP tools to satisfy this "
+            "You MUST call one of the available host MCP tools to satisfy this "
             "request. Do not answer with plain text instead of a tool call."
         )
     if kind == "function" and name:
         return (
-            f"You MUST call the Hermes MCP tool '{name}' to satisfy this request. "
+            f"You MUST call the host MCP tool '{name}' to satisfy this request. "
             "Do not call any other tool and do not answer with plain text."
         )
     return None
@@ -723,13 +723,16 @@ def cli_path() -> str | None:
     return shutil.which("claude")
 
 
-_HERMES_TOOL_SYSTEM_PROMPT = """
-Hermes host tool protocol:
-- Use only the MCP tools from the `hermes-tools` server for host capabilities.
-- Hermes, not Claude Code, executes those tools and returns results in the next request.
-- When a web/network task is needed, call the provided Hermes `web_search` or `web_extract` MCP tool.
+# Brand-neutral on purpose: this text (and the `host-tools` server name) goes
+# into the model context on every request. Naming the host application here
+# adds nothing for the model — the protocol is the same for any host.
+_HOST_TOOL_SYSTEM_PROMPT = """
+Host tool protocol:
+- Use only the MCP tools from the `host-tools` server for host capabilities.
+- The host application, not Claude Code, executes those tools and returns results in the next request.
+- When a web/network task is needed, call the provided `web_search` or `web_extract` MCP tool.
 - Never ask the user to enable WebFetch, Tavily, Bash, Agent, or other Claude Code-native tools; they are not the execution path here.
-- After calling a Hermes MCP tool, stop and let the host return the tool result.
+- After calling a host MCP tool, stop and let the host return the tool result.
 """.strip()
 
 
@@ -738,6 +741,15 @@ class ClaudeBridge:
 
     def __init__(self, config: Config | None = None) -> None:
         self.config = config or get_config()
+
+    def _isolated_workdir(self) -> str:
+        """Empty directory the backend runs in when no cwd was requested."""
+        workdir = self.config.backend_workdir
+        try:
+            workdir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return str(workdir)
+        return str(workdir)
 
     # -- auth env hygiene -------------------------------------------------- #
     def _backend_env(self) -> dict[str, str] | None:
@@ -946,8 +958,14 @@ class ClaudeBridge:
         system_appends: list[str] = []
         if conv.system_prompt:
             system_appends.append(conv.system_prompt)
-        if conv.cwd:
-            kwargs["cwd"] = conv.cwd
+        # Always pin a working directory. Without an explicit cwd the backend
+        # would inherit the proxy process's cwd and gather ITS git status /
+        # files into the system prompt — leaking host context into prompts
+        # and, live-confirmed by Anthropic as a harness-detection bug,
+        # flipping sessions to extra-usage billing when that context contains
+        # "hermes"-named git content. An empty isolated dir has no context to
+        # gather.
+        kwargs["cwd"] = conv.cwd or self._isolated_workdir()
         if conv.effort:
             kwargs["effort"] = conv.effort
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
@@ -965,7 +983,7 @@ class ClaudeBridge:
             if conv.mode == "strict":
                 kwargs["max_turns"] = 1
             kwargs["allowed_tools"] = allowed
-            system_appends.append(_HERMES_TOOL_SYSTEM_PROMPT)
+            system_appends.append(_HOST_TOOL_SYSTEM_PROMPT)
             kind, name = normalize_tool_choice(conv.tool_choice)
             directive = _tool_choice_directive(kind, name)
             if directive:
@@ -1161,7 +1179,8 @@ class ClaudeBridge:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=conv.cwd or None,
+            # Same isolation as the SDK path: never inherit the proxy's cwd.
+            cwd=conv.cwd or self._isolated_workdir(),
             env=self._backend_env(),
         )
         out, err = await proc.communicate(conv.prompt.encode("utf-8"))

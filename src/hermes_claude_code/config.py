@@ -189,6 +189,17 @@ class Config:
         return self.run_dir / "hermes-claude-code.pid"
 
     @property
+    def backend_workdir(self) -> Path:
+        # Isolated, empty working directory for the Claude Code backend when
+        # the request doesn't ask for a specific cwd. Claude Code gathers
+        # context from its working directory (git status, files) and pulls it
+        # into the system prompt; a pure LLM bridge must not leak the host
+        # process's cwd into prompts. This also avoids Anthropic's confirmed
+        # harness-detection bug where "hermes"-named git content in the
+        # gathered context flipped sessions to extra-usage billing.
+        return self.run_dir / "workdir"
+
+    @property
     def models_cache_file(self) -> Path:
         # Written by `hermes-claude-code models --probe --apply`; read by the
         # proxy's /v1/models (see models_probe.effective_models).
