@@ -161,10 +161,15 @@ class Config:
     cwd: str | None = None
     request_timeout: float = 600.0
     startup_timeout: float = 30.0
-    # When True, the bridge strips ANTHROPIC_API_KEY from the backend
-    # subprocess environment so Claude Code always uses the `claude login`
-    # subscription (OAuth) instead of silently billing at API rates.
-    force_subscription: bool = False
+    # When True (the default), the bridge strips API-key/billing env vars
+    # (ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL) from the
+    # backend subprocess so Claude Code always uses the `claude login`
+    # subscription (OAuth). Verified live: an inherited key silently rerouted
+    # every request to extra-usage billing while Hermes' own env-stripped
+    # smoke test worked. Subscription use is this plugin's entire contract —
+    # opt OUT with HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION=0 if you really
+    # want inherited API-key billing.
+    force_subscription: bool = True
     fallback_models: tuple = FALLBACK_MODELS
     models: tuple = DEFAULT_MODELS
 
@@ -220,6 +225,6 @@ def get_config() -> Config:
         cwd=os.environ.get("HERMES_CLAUDE_CODE_CWD") or None,
         request_timeout=_env_float("HERMES_CLAUDE_CODE_TIMEOUT", 600.0),
         startup_timeout=_env_float("HERMES_CLAUDE_CODE_STARTUP_TIMEOUT", 30.0),
-        force_subscription=_env_bool("HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION", False),
+        force_subscription=_env_bool("HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION", True),
         models=_env_models(MODELS_ENV_VAR, DEFAULT_MODELS),
     )

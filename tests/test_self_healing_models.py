@@ -212,3 +212,29 @@ def test_stale_proxy_version_detection():
     assert _proxy_version_current({"status": "ok", "version": "0.1.0"}) is False
     assert _proxy_version_current({"status": "ok"}) is False
     assert _proxy_version_current(None) is False
+
+
+def test_backend_env_strips_api_billing_vars_by_default(monkeypatch):
+    # Default contract: the backend must authenticate via the `claude login`
+    # subscription. An inherited ANTHROPIC_API_KEY silently rerouted every
+    # request to extra-usage billing (verified live: Hermes' own env-stripped
+    # smoke test worked while identical picker requests failed).
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-test")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://elsewhere.example")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sub-token")
+    monkeypatch.delenv("HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION", raising=False)
+
+    env = ClaudeBridge(get_config())._backend_env()
+
+    assert env is not None
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+    assert "ANTHROPIC_BASE_URL" not in env
+    # The subscription credential must survive.
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sub-token"
+
+
+def test_backend_env_inherits_when_forced_off(monkeypatch):
+    monkeypatch.setenv("HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION", "0")
+    assert ClaudeBridge(get_config())._backend_env() is None

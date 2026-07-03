@@ -736,6 +736,18 @@ Host tool protocol:
 """.strip()
 
 
+# Env vars that reroute Claude Code's auth/endpoint away from the
+# `claude login` subscription. Verified live: an inherited ANTHROPIC_API_KEY
+# silently pushed every request onto extra-usage billing, while the same
+# request with the key stripped was served from the plan. CLAUDE_CODE_OAUTH_TOKEN
+# is deliberately NOT in this list — it IS the subscription credential.
+_API_BILLING_ENV_VARS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+)
+
+
 class ClaudeBridge:
     """Drives Claude Code via the SDK, falling back to the ``claude`` CLI."""
 
@@ -755,15 +767,17 @@ class ClaudeBridge:
     def _backend_env(self) -> dict[str, str] | None:
         """Environment for the Claude Code backend, or None to inherit as-is.
 
-        With ``force_subscription`` on, ANTHROPIC_API_KEY is removed so Claude
-        Code falls back to the ``claude login`` subscription (OAuth) instead of
-        silently billing at API rates. Off by default → returns None so the
-        backend inherits the process environment unchanged (current behaviour).
+        With ``force_subscription`` on (the default), API-key/billing env
+        vars are removed so Claude Code always authenticates via the
+        ``claude login`` subscription (OAuth) instead of silently billing an
+        inherited key. ``HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION=0`` restores
+        plain inheritance.
         """
         if not self.config.force_subscription:
             return None
         env = dict(os.environ)
-        env.pop("ANTHROPIC_API_KEY", None)
+        for var in _API_BILLING_ENV_VARS:
+            env.pop(var, None)
         return env
 
     # -- subscription self-healing ------------------------------------------ #

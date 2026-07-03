@@ -94,7 +94,7 @@ something:
 | `HERMES_CLAUDE_CODE_MODELS` | `Fable 5,Opus 4.8,Sonnet 5,Haiku 4.5` | Comma-separated model list shown in the picker. Entries can be the built-in display names or raw Claude Code selectors (`sonnet[1m]`, `opusplan`, …) passed through as-is. Stick to aliases — pinned model IDs like `claude-sonnet-4-6` are billed as **extra usage**, not your subscription. |
 | `HERMES_CLAUDE_CODE_MODE` | `strict` | `strict`: Hermes stays in control of tool calls. `agentic`: Claude Code runs tools itself. |
 | `HERMES_CLAUDE_CODE_CWD` | _(none)_ | Working directory Claude Code operates in |
-| `HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION` | `0` | Set to `1` to force subscription use even if `ANTHROPIC_API_KEY` happens to be set somewhere in the environment |
+| `HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION` | `1` | On by default: the backend's environment is scrubbed of `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` so requests always run on your `claude login` subscription. Set to `0` only if you deliberately want an inherited API key to be used (metered billing). |
 
 ⚠️ **Don't set `ANTHROPIC_API_KEY` anywhere near this plugin.** If it's set,
 Claude Code uses it instead of your subscription and bills at API rates.
