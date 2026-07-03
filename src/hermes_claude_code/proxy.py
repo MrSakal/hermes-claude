@@ -391,8 +391,19 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+def _proxy_version_current(health: dict[str, Any] | None) -> bool:
+    """Whether a healthy proxy is running THIS package version.
+
+    A proxy process keeps serving the code it was started with; after a
+    plugin upgrade the old process would silently keep running stale code
+    (observed live: fixes "not taking effect" until a manual stop/start).
+    Version mismatch → the caller should replace the process.
+    """
+    return bool(health) and str(health.get("version") or "") == __version__
+
+
 def ensure_proxy_running(config: Config | None = None) -> dict[str, Any]:
-    """Start the proxy if not already healthy. Returns a status dict."""
+    """Start the proxy if not already healthy AND current. Returns a status dict."""
     import subprocess
     import sys
 
@@ -400,7 +411,27 @@ def ensure_proxy_running(config: Config | None = None) -> dict[str, Any]:
 
     existing = health_check(cfg)
     if existing is not None:
-        return {"status": "already-running", "health": existing, "port": cfg.port}
+        if _proxy_version_current(existing):
+            return {"status": "already-running", "health": existing, "port": cfg.port}
+        # Stale proxy from a previous install — replace it so the upgrade
+        # actually takes effect.
+        logger.info(
+            "replacing stale proxy (running=%s, installed=%s)",
+            existing.get("version"), __version__,
+        )
+        stop_proxy(cfg)
+        deadline = time.time() + 5
+        while health_check(cfg) is not None and time.time() < deadline:
+            time.sleep(0.2)
+        if health_check(cfg) is not None:
+            # Could not take the old one down (e.g. foreign process without a
+            # pid file) — keep serving rather than breaking the session.
+            return {
+                "status": "already-running",
+                "health": existing,
+                "port": cfg.port,
+                "stale": True,
+            }
 
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
 

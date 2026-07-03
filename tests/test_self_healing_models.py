@@ -156,3 +156,59 @@ def test_unavailable_models_are_hidden_but_recoverable():
     models_probe._OVERRIDES_MEMO.update(mtime=None, map={})
     models_probe.record_backend_override(cfg, "Fable 5", "claude-fable-5")
     assert "Fable 5" in effective_models(cfg)
+
+
+def test_complete_falls_back_by_stripping_effort():
+    # Adaptive effort/thinking can itself flip a request to extra-usage
+    # billing; the same selector without effort must be tried and the
+    # discovery persisted so future requests drop effort up front.
+    bridge = ClaudeBridge(get_config())
+    calls: list[tuple[str, object]] = []
+
+    async def fake_complete_once(conv: Conversation) -> BridgeResult:
+        calls.append((conv.backend_model, conv.effort))
+        if conv.effort:
+            raise _EXTRA_USAGE
+        return BridgeResult(text="served")
+
+    bridge._complete_once = fake_complete_once  # type: ignore[method-assign]
+
+    conv = Conversation(
+        model="Fable 5",
+        backend_model="fable",
+        system_prompt="",
+        prompt="hi",
+        effort="medium",
+    )
+    result = asyncio.run(bridge.complete(conv))
+
+    assert result.text == "served"
+    # Effort-stripped variant of the SAME selector is the first fallback.
+    assert calls == [("fable", "medium"), ("fable", None)]
+    assert models_probe.effort_allowed(get_config()) is False
+
+    # prepare_conversation now drops effort up front (with a warning).
+    prepared = prepare_conversation(
+        {
+            "model": "Fable 5",
+            "reasoning_effort": "medium",
+            "messages": [{"role": "user", "content": "x"}],
+        },
+        get_config(),
+    )
+    assert prepared.effort is None
+    assert any("adaptive effort disabled" in w for w in prepared.warnings)
+
+
+def test_effort_allowed_defaults_true_without_cache():
+    assert models_probe.effort_allowed(get_config()) is True
+
+
+def test_stale_proxy_version_detection():
+    from hermes_claude_code import __version__
+    from hermes_claude_code.proxy import _proxy_version_current
+
+    assert _proxy_version_current({"status": "ok", "version": __version__}) is True
+    assert _proxy_version_current({"status": "ok", "version": "0.1.0"}) is False
+    assert _proxy_version_current({"status": "ok"}) is False
+    assert _proxy_version_current(None) is False

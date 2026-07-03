@@ -186,6 +186,19 @@ def record_backend_override(config: Config, display: str, backend: str) -> None:
     _write_cache(config, data)
 
 
+def record_effort_unsupported(config: Config) -> None:
+    """Remember that adaptive effort/thinking options break plan billing.
+
+    Set by the bridge when a request only succeeded after stripping the
+    ``effort``/``thinking`` options — from then on ``prepare_conversation``
+    drops them up front instead of paying a failed attempt per request.
+    """
+    data = _read_cache(config) or {}
+    data["strip_effort"] = True
+    data["updated_at"] = int(time.time())
+    _write_cache(config, data)
+
+
 def record_model_unavailable(config: Config, display: str) -> None:
     """Mark *display* as not plan-covered (every candidate hit extra usage).
 
@@ -245,24 +258,40 @@ def effective_models(config: Config | None = None) -> tuple:
     return filtered or cfg.models
 
 
-# Memoised on the cache file's mtime: backend_overrides() sits on the
-# per-request path in the bridge, and re-reading + re-parsing the JSON for
-# every completion would be wasted I/O.
-_OVERRIDES_MEMO: dict[str, Any] = {"mtime": None, "map": {}}
+# Memoised on the cache file's mtime: these sit on the per-request path in
+# the bridge, and re-reading + re-parsing the JSON for every completion
+# would be wasted I/O.
+_OVERRIDES_MEMO: dict[str, Any] = {"mtime": None, "map": {}, "strip_effort": False}
 
 
-def backend_overrides(config: Config | None = None) -> dict[str, str]:
-    """Display-name → proven-backend-selector map from the probe cache."""
-    cfg = config or get_config()
+def _refresh_memo(cfg: Config) -> bool:
+    """Load the cache into the memo if its mtime changed. False = no cache."""
     try:
         mtime = cfg.models_cache_file.stat().st_mtime
     except OSError:
-        return {}
+        return False
     if _OVERRIDES_MEMO["mtime"] != mtime:
         data = _read_cache(cfg) or {}
         raw = data.get("backend_overrides") or {}
         _OVERRIDES_MEMO["map"] = {
             str(k): str(v) for k, v in raw.items() if isinstance(v, str) and v
         }
+        _OVERRIDES_MEMO["strip_effort"] = bool(data.get("strip_effort"))
         _OVERRIDES_MEMO["mtime"] = mtime
+    return True
+
+
+def backend_overrides(config: Config | None = None) -> dict[str, str]:
+    """Display-name → proven-backend-selector map from the probe cache."""
+    cfg = config or get_config()
+    if not _refresh_memo(cfg):
+        return {}
     return _OVERRIDES_MEMO["map"]
+
+
+def effort_allowed(config: Config | None = None) -> bool:
+    """False when adaptive effort options are known to break plan billing."""
+    cfg = config or get_config()
+    if not _refresh_memo(cfg):
+        return True
+    return not _OVERRIDES_MEMO["strip_effort"]
