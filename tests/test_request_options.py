@@ -109,7 +109,7 @@ def test_sdk_options_keep_hermes_tools_host_delegated():
     assert options.tools == []
     assert options.strict_mcp_config is True
     assert options.permission_mode == "dontAsk"
-    assert options.allowed_tools == ["mcp__hermes-tools__web_search"]
+    assert options.allowed_tools == ["mcp__host-tools__web_search"]
     assert options.max_turns == 1
     # Subscription-critical shape: the claude_code preset must stay, with
     # Hermes' additions appended — replacing the system prompt outright makes
@@ -200,3 +200,30 @@ def test_extract_text_multipart():
         [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]
     )
     assert text == "a\nb"
+
+
+def test_backend_always_gets_isolated_cwd(tmp_path, monkeypatch):
+    # Without an explicit cwd the backend must run in the plugin's empty
+    # isolated workdir — never inherit the proxy process's cwd, whose git
+    # status/files Claude Code would gather into the system prompt (host
+    # context leak; also Anthropic's confirmed harness-detection billing bug
+    # triggers on "hermes"-named git content in gathered context).
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    from hermes_claude_code.bridge import ClaudeBridge
+    from hermes_claude_code.config import get_config
+
+    cfg = get_config()
+    conv = prepare_conversation(
+        {"messages": [{"role": "user", "content": "hi"}]}, cfg
+    )
+    options, _ = ClaudeBridge(cfg)._build_options(conv)
+    assert str(options.cwd) == str(cfg.backend_workdir)
+    assert cfg.backend_workdir.is_dir()  # created, empty, no git repo
+
+    # An explicit cwd (payload or env) is honored untouched.
+    conv = prepare_conversation(
+        {"messages": [{"role": "user", "content": "hi"}], "cwd": str(tmp_path)},
+        cfg,
+    )
+    options, _ = ClaudeBridge(cfg)._build_options(conv)
+    assert str(options.cwd) == str(tmp_path)

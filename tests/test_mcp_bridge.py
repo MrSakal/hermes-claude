@@ -59,13 +59,13 @@ def test_tool_use_to_openai_accepts_string_args_and_explicit_id():
 
 def test_qualified_name_roundtrip():
     q = mcp_server.mcp_qualified_name("get_weather")
-    assert q == "mcp__hermes-tools__get_weather"
+    assert q == "mcp__host-tools__get_weather"
     assert mcp_server.strip_mcp_prefix(q) == "get_weather"
     assert mcp_server.strip_mcp_prefix("plain") == "plain"
 
 
 def test_internal_sdk_tools_are_not_hermes_mcp_tools():
-    assert mcp_server.is_hermes_mcp_tool_name("mcp__hermes-tools__get_weather")
+    assert mcp_server.is_hermes_mcp_tool_name("mcp__host-tools__get_weather")
     assert not mcp_server.is_hermes_mcp_tool_name("ToolSearch")
     assert not mcp_server.is_hermes_mcp_tool_name("Read")
 
@@ -74,7 +74,7 @@ def test_build_sdk_mcp_server_exposes_same_tools():
     # claude-agent-sdk is installed in the test env (sdk extra).
     server, allowed, captured = mcp_server.build_sdk_mcp_server(TOOLS)
     assert server is not None
-    assert allowed == ["mcp__hermes-tools__get_weather"]
+    assert allowed == ["mcp__host-tools__get_weather"]
     assert captured == []
 
 

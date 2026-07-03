@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-MCP_SERVER_NAME = "hermes-tools"
+MCP_SERVER_NAME = "host-tools"
 
 
 def mcp_tool_specs(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -71,7 +71,7 @@ def tool_use_to_openai(
 
 
 def strip_mcp_prefix(name: str) -> str:
-    """Map ``mcp__hermes-tools__foo`` back to the Hermes tool name ``foo``."""
+    """Map ``mcp__host-tools__foo`` back to the Hermes tool name ``foo``."""
     prefix = f"mcp__{MCP_SERVER_NAME}__"
     if name.startswith(prefix):
         return name[len(prefix) :]
