@@ -38,37 +38,26 @@ LOCAL_API_KEY = "hermes-claude-code-local"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 35345
-# Model names shown to Hermes users. Keep these aligned with Claude/claude.ai
-# public product names, but omit the redundant "Claude" prefix because the
-# provider row is already named "Claude Code".
-# The picker exposes Claude Code's own model selectors VERBATIM. These are
-# the exact strings the working reference invocation uses (`-m sonnet`), so
-# what the user picks is byte-for-byte what the backend receives — no
-# display-name indirection to go wrong. `sonnet` first: it is the
-# live-verified subscription-served selector, and the first entry doubles as
-# the default model.
+# The picker exposes Claude Code's official full model IDs VERBATIM — the
+# same nomenclature Claude Code itself reports (`claude-sonnet-4-6` is what
+# the model self-identified as through this very bridge). What the user
+# picks is byte-for-byte what the backend receives; no display-name
+# indirection to go wrong. The first entry doubles as the default model.
 DEFAULT_MODELS = (
-    "sonnet",
-    "haiku",
-    "opus",
-    "fable",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5",
+    "claude-opus-4-8",
+    "claude-fable-5",
 )
-# Claude Code needs CLI/API selector values, not human display names.
-#
-# SUBSCRIPTION-CRITICAL: these MUST be Claude Code's model *aliases*
-# (sonnet/opus/haiku/...), never pinned model IDs like ``claude-sonnet-4-6``.
-# Verified live (2026-07-03, same proxy, same credentials, 30s apart): the
-# ``sonnet`` alias was served from the Claude subscription allowance, while
-# the pinned ``claude-sonnet-4-6`` ID failed with ``API Error: 400 You're
-# out of extra usage`` — pinned IDs are billed as extra usage.
+# Legacy picker entries from previously saved configs/sessions keep routing
+# to a valid selector. (Aliases like `sonnet` pass through untouched — they
+# are valid Claude Code selectors in their own right.)
 MODEL_ID_ALIASES = {
-    # Back-compat: sessions/configs saved while the picker showed display
-    # names keep routing to the same selectors.
-    "Fable 5": "fable",
-    "Opus 4.8": "opus",
-    "Sonnet 5": "sonnet",
-    "Haiku 4.5": "haiku",
-    "Sonnet 4.6": "sonnet",
+    "Fable 5": "claude-fable-5",
+    "Opus 4.8": "claude-opus-4-8",
+    "Sonnet 5": "claude-sonnet-4-6",
+    "Haiku 4.5": "claude-haiku-4-5",
+    "Sonnet 4.6": "claude-sonnet-4-6",
 }
 FALLBACK_MODELS = DEFAULT_MODELS
 MODEL_OWNER = "anthropic-claude-code"
@@ -162,6 +151,12 @@ class Config:
     # opt OUT with HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION=0 if you really
     # want inherited API-key billing.
     force_subscription: bool = True
+    # Advertised context window (tokens). 200k is the subscription-safe
+    # boundary: above it Claude Code flips to 1M-context mode, which bills as
+    # extra usage on every plan (see models_payload). Raise it deliberately
+    # via HERMES_CLAUDE_CODE_CONTEXT_LENGTH only if you have extra-usage
+    # credits and want long-context requests.
+    context_length: int = 200_000
     fallback_models: tuple = FALLBACK_MODELS
     models: tuple = DEFAULT_MODELS
 
@@ -213,4 +208,5 @@ def get_config() -> Config:
         startup_timeout=_env_float("HERMES_CLAUDE_CODE_STARTUP_TIMEOUT", 30.0),
         force_subscription=_env_bool("HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION", True),
         models=_env_models(MODELS_ENV_VAR, DEFAULT_MODELS),
+        context_length=_env_int("HERMES_CLAUDE_CODE_CONTEXT_LENGTH", 200_000),
     )

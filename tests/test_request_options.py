@@ -22,29 +22,19 @@ WEB_SEARCH_TOOL = {
 
 def test_model_defaults_to_first_when_absent():
     conv = prepare_conversation({"messages": [{"role": "user", "content": "x"}]}, Config())
-    assert conv.model == "sonnet"
-    assert conv.backend_model == "sonnet"
+    assert conv.model == "claude-sonnet-4-6"
+    assert conv.backend_model == "claude-sonnet-4-6"
 
 
-def test_display_model_maps_to_claude_code_alias_not_pinned_id():
-    # Subscription-critical: pinned IDs (claude-sonnet-4-6) bill as extra
-    # usage; only Claude Code's model aliases draw from the plan allowance.
+def test_legacy_display_names_map_to_official_ids():
+    # Old saved configs ("Sonnet 4.6", "Haiku 4.5", ...) keep working by
+    # routing to the official Claude Code model IDs.
     conv = prepare_conversation(
         {"model": "Sonnet 4.6", "messages": [{"role": "user", "content": "x"}]},
         Config(),
     )
     assert conv.model == "Sonnet 4.6"
-    assert conv.backend_model == "sonnet"
-
-
-def test_backend_models_are_never_pinned_ids():
-    from hermes_claude_code.config import MODEL_ID_ALIASES
-
-    for display, backend in MODEL_ID_ALIASES.items():
-        assert not backend.startswith("claude-"), (
-            f"{display!r} maps to pinned id {backend!r}; pinned ids are billed "
-            "as extra usage instead of the subscription — use the alias"
-        )
+    assert conv.backend_model == "claude-sonnet-4-6"
 
 
 def test_system_and_developer_collected():
