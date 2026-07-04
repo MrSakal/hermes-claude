@@ -43,14 +43,21 @@ Or just pick it interactively with `hermes model`.
 
 ## Which models can I pick?
 
-The picker offers Claude Code's own model selectors **verbatim** —
-`sonnet`, `haiku`, `opus`, `fable` — and sends exactly what you pick to the
-backend, with no name translation or automatic rerouting in between. Which
-of them your subscription actually serves is decided server-side per plan;
-if one is rejected, you see the real error. Customize the list with
-`HERMES_CLAUDE_CODE_MODELS` (raw selectors like `sonnet[1m]` and `opusplan`
-work too). `hermes-claude-code models` (or `/claude-code models` in-session)
-prints the current list.
+The picker offers Claude Code's official model IDs **verbatim** —
+`claude-sonnet-4-6`, `claude-haiku-4-5`, `claude-opus-4-8`,
+`claude-fable-5` — and sends exactly what you pick to the backend, with no
+name translation or automatic rerouting in between. Which models your
+subscription serves is decided server-side per plan; if one is rejected,
+you see the real error. Customize the list with `HERMES_CLAUDE_CODE_MODELS`
+(aliases like `sonnet` and raw selectors like `sonnet[1m]` / `opusplan`
+work too). `hermes-claude-code models` (or `/claude-code models`
+in-session) prints the current list.
+
+One thing that IS size-dependent: requests above ~200k tokens flip Claude
+Code into 1M-context mode, which bills as **extra usage** on every plan.
+The proxy advertises a 200k context window so Hermes compresses context to
+stay under it — if you see "out of extra usage" with a huge toolset, check
+the proxy log's `approx_tokens` value.
 
 After a plugin upgrade, a still-running old proxy is detected by version and
 replaced automatically — no manual stop/start needed.
@@ -75,7 +82,7 @@ something:
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `HERMES_CLAUDE_CODE_PORT` | `35345` | Local proxy port |
-| `HERMES_CLAUDE_CODE_MODELS` | `claude-sonnet-4-6,claude-haiku-4-5,claude-opus-4-8,claude-fable-5` | Comma-separated model list shown in the picker. Entries can be the built-in display names or raw Claude Code selectors (`sonnet[1m]`, `opusplan`, …) passed through as-is. Stick to aliases — pinned model IDs like `claude-sonnet-4-6` are billed as **extra usage**, not your subscription. |
+| `HERMES_CLAUDE_CODE_MODELS` | `claude-sonnet-4-6,claude-haiku-4-5,claude-opus-4-8,claude-fable-5` | Comma-separated model list shown in the picker. Entries can be official model IDs, aliases (`sonnet`, `opus`, …) or raw selectors (`sonnet[1m]`, `opusplan`) — all passed through as-is. |
 | `HERMES_CLAUDE_CODE_CONTEXT_LENGTH` | `200000` | Context window advertised to Hermes. 200k is the subscription-safe boundary: larger requests make Claude Code switch to 1M-context mode, which bills as **extra usage** on every plan (claude-code#28927). Raise only if you have extra-usage credits. |
 | `HERMES_CLAUDE_CODE_MODE` | `strict` | `strict`: Hermes stays in control of tool calls. `agentic`: Claude Code runs tools itself. |
 | `HERMES_CLAUDE_CODE_CWD` | _(none)_ | Working directory Claude Code operates in |
