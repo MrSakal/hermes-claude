@@ -40,6 +40,17 @@ def main(argv: list[str] | None = None) -> int:
     d = sub.add_parser("doctor", help="Diagnose dependencies/auth/proxy")
     d.add_argument("--live", action="store_true", help="Send a trivial live completion")
     sub.add_parser("models", help="List the models the picker offers")
+    dg = sub.add_parser(
+        "diagnose",
+        help="Send a controlled request matrix to isolate what triggers "
+        "'out of extra usage' (one variable per case)",
+    )
+    dg.add_argument(
+        "--full",
+        action="store_true",
+        help="Also run the two large-context cases (~150k and ~230k tokens; "
+        "the 230k one is EXPECTED to fail if 1M-context billing is the trigger)",
+    )
     args = parser.parse_args(argv)
 
     cfg = get_config()
@@ -78,6 +89,13 @@ def main(argv: list[str] | None = None) -> int:
     if action == "models":
         print(json.dumps({"models": list(cfg.models)}, indent=2))
         return 0
+    if action == "diagnose":
+        from .diagnose import format_matrix, run_matrix
+
+        ensure_proxy_running(cfg)
+        results = run_matrix(cfg, full=getattr(args, "full", False))
+        print(format_matrix(results, cfg))
+        return 0 if all(r.get("ok") for r in results) else 1
 
     print(json.dumps(proxy_status(cfg), indent=2))
     return 0
