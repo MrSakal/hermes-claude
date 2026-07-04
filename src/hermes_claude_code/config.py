@@ -186,6 +186,20 @@ class Config:
 
     @property
     def pid_file(self) -> Path:
+        # Deliberately NOT the pre-0.3.7 name ("hermes-claude-code.pid"):
+        # plugin versions before 0.3.2 replace any proxy whose version merely
+        # differs from their own — including NEWER ones — by killing the pid
+        # from this file. Verified live: a leftover 0.3.1 install kept
+        # murdering the current proxy ("replacing stale proxy
+        # (running=0.3.6, installed=0.3.1)"). Those versions can't see this
+        # file name, so their stop is a no-op and they gracefully fall back
+        # to USING the newer proxy instead.
+        return self.run_dir / "hermes-claude-code.proxy.pid"
+
+    @property
+    def legacy_pid_file(self) -> Path:
+        # Still read (never written) so current code can stop/replace proxies
+        # started by pre-0.3.7 versions.
         return self.run_dir / "hermes-claude-code.pid"
 
     @property

@@ -29,14 +29,28 @@ def _filler(tokens: int) -> str:
     return _FILLER_SENTENCE * reps
 
 
-def _dummy_tool(index: int, fat_tokens: int = 0) -> dict[str, Any]:
-    description = f"Dummy diagnostic tool #{index}. Never call this."
+def _dummy_tool(
+    index: int, fat_tokens: int = 0, branded: bool = False
+) -> dict[str, Any]:
+    if branded:
+        # Mirrors the real Hermes toolset's naming/description style. Exists
+        # to test whether Anthropic's harness-detection (confirmed to scan
+        # for the "hermes" marker) classifies such requests as third-party
+        # traffic and bills them as extra usage.
+        name = f"hermes_agent_tool_{index}"
+        description = (
+            f"Hermes agent tool #{index}. Part of the Hermes autonomous "
+            "agent harness toolset. Hermes executes this on the host."
+        )
+    else:
+        name = f"diag_tool_{index}"
+        description = f"Dummy diagnostic tool #{index}. Never call this."
     if fat_tokens:
         description += " " + _filler(fat_tokens)
     return {
         "type": "function",
         "function": {
-            "name": f"diag_tool_{index}",
+            "name": name,
             "description": description,
             "parameters": {
                 "type": "object",
@@ -48,15 +62,24 @@ def _dummy_tool(index: int, fat_tokens: int = 0) -> dict[str, Any]:
     }
 
 
+_HERMES_MARKER_SYSTEM = (
+    "You are Hermes, an autonomous AI agent. Hermes is an agent harness "
+    "that executes tools on the host machine and returns their results. "
+    "Always answer as Hermes.\n"
+) * 10
+
+
 def build_cases(model: str, full: bool = False) -> list[dict[str, Any]]:
     """One payload per hypothesis, changing a single variable at a time."""
 
-    def payload(messages, tools=None, effort=None):
+    def payload(messages, tools=None, effort=None, stream=False):
         p: dict[str, Any] = {"model": model, "messages": messages}
         if tools:
             p["tools"] = tools
         if effort:
             p["reasoning_effort"] = effort
+        if stream:
+            p["stream"] = True
         return p
 
     user = {"role": "user", "content": _OK_PROMPT}
@@ -106,6 +129,48 @@ def build_cases(model: str, full: bool = False) -> list[dict[str, Any]]:
                 ]
             ),
         },
+        # --- harness-marker axis: identical shapes, only the wording differs.
+        # Anthropic confirmed a detector that scans context for the "hermes"
+        # marker and reroutes billing; these isolate whether it fires here.
+        {
+            "name": "system prompt says 'You are Hermes'",
+            "payload": payload(
+                [{"role": "system", "content": _HERMES_MARKER_SYSTEM}, user]
+            ),
+        },
+        {
+            "name": "30 hermes-branded tools",
+            "payload": payload(
+                [user], tools=[_dummy_tool(i, branded=True) for i in range(30)]
+            ),
+        },
+        # --- streaming axis: the real Hermes TUI always streams.
+        {
+            "name": "baseline (stream)",
+            "payload": payload([user], stream=True),
+        },
+        {
+            "name": "30 small tools (stream)",
+            "payload": payload(
+                [user], tools=[_dummy_tool(i) for i in range(30)], stream=True
+            ),
+        },
+        {
+            "name": "30 hermes-branded tools (stream)",
+            "payload": payload(
+                [user],
+                tools=[_dummy_tool(i, branded=True) for i in range(30)],
+                stream=True,
+            ),
+        },
+        {
+            "name": "hermes system + hermes tools (stream)",
+            "payload": payload(
+                [{"role": "system", "content": _HERMES_MARKER_SYSTEM}, user],
+                tools=[_dummy_tool(i, branded=True) for i in range(30)],
+                stream=True,
+            ),
+        },
     ]
     if full:
         cases += [
@@ -140,6 +205,20 @@ def run_matrix(
             import httpx
 
             resp = httpx.post(u, json=payload, timeout=timeout)
+            if payload.get("stream"):
+                # The proxy streams errors as SSE data events with HTTP 200;
+                # surface them as failures so the stream axis is honest.
+                for line in resp.text.splitlines():
+                    if not line.startswith("data: ") or line == "data: [DONE]":
+                        continue
+                    try:
+                        chunk = _json.loads(line[len("data: "):])
+                    except Exception:
+                        continue
+                    err = (chunk or {}).get("error")
+                    if err:
+                        return 400, {"error": err}
+                return resp.status_code, {}
             try:
                 body = resp.json()
             except Exception:

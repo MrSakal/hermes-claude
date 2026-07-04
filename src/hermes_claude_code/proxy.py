@@ -379,10 +379,12 @@ def health_check(config: Config, timeout: float = 2.0) -> dict[str, Any] | None:
 
 
 def _read_pid(config: Config) -> int | None:
-    try:
-        return int(config.pid_file.read_text().strip())
-    except Exception:
-        return None
+    for path in (config.pid_file, config.legacy_pid_file):
+        try:
+            return int(path.read_text().strip())
+        except Exception:
+            continue
+    return None
 
 
 def _pid_alive(pid: int) -> bool:
@@ -538,9 +540,11 @@ def stop_proxy(config: Config | None = None) -> dict[str, Any]:
         except OSError:
             pass
         _safe_unlink(cfg.pid_file)
+        _safe_unlink(cfg.legacy_pid_file)
         _safe_unlink(cfg.lock_file)
         return {"status": "stopped", "pid": pid}
     _safe_unlink(cfg.pid_file)
+    _safe_unlink(cfg.legacy_pid_file)
     _safe_unlink(cfg.lock_file)
     return {"status": "not-running"}
 
