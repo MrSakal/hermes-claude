@@ -22,19 +22,25 @@ WEB_SEARCH_TOOL = {
 
 def test_model_defaults_to_first_when_absent():
     conv = prepare_conversation({"messages": [{"role": "user", "content": "x"}]}, Config())
-    assert conv.model == "claude-sonnet-4-6"
-    assert conv.backend_model == "claude-sonnet-4-6"
+    assert conv.model == "sonnet"
+    assert conv.backend_model == "sonnet"
 
 
-def test_legacy_display_names_map_to_official_ids():
+def test_legacy_display_names_map_to_official_aliases():
     # Old saved configs ("Sonnet 4.6", "Haiku 4.5", ...) keep working by
-    # routing to the official Claude Code model IDs.
+    # routing to the official Claude Code aliases; full IDs pass through.
     conv = prepare_conversation(
         {"model": "Sonnet 4.6", "messages": [{"role": "user", "content": "x"}]},
         Config(),
     )
     assert conv.model == "Sonnet 4.6"
-    assert conv.backend_model == "claude-sonnet-4-6"
+    assert conv.backend_model == "sonnet"
+
+    conv = prepare_conversation(
+        {"model": "claude-opus-4-8", "messages": [{"role": "user", "content": "x"}]},
+        Config(),
+    )
+    assert conv.backend_model == "claude-opus-4-8"
 
 
 def test_system_and_developer_collected():
