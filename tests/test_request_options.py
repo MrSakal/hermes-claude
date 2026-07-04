@@ -224,3 +224,53 @@ def test_backend_always_gets_isolated_cwd(tmp_path, monkeypatch):
     )
     options, _ = ClaudeBridge(cfg)._build_options(conv)
     assert str(options.cwd) == str(tmp_path)
+
+
+def test_oversized_system_prompt_goes_via_file(tmp_path, monkeypatch):
+    # Linux caps a single exec argument at ~128KiB; a full Hermes system
+    # prompt exceeds it and the backend exec died with "[Errno 7] Argument
+    # list too long" (reproduced live by the diagnose matrix). Oversized
+    # appends must travel via --append-system-prompt-file instead of argv.
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    from pathlib import Path
+
+    from hermes_claude_code.config import get_config
+
+    cfg = get_config()
+    big_system = "x" * 200_000  # ~200KB, over MAX_ARG_STRLEN
+    conv = prepare_conversation(
+        {
+            "messages": [
+                {"role": "system", "content": big_system},
+                {"role": "user", "content": "hi"},
+            ]
+        },
+        cfg,
+    )
+    options, _ = ClaudeBridge(cfg)._build_options(conv)
+
+    # Not inline: the preset carries no huge append string.
+    assert "append" not in options.system_prompt
+    file_arg = (options.extra_args or {}).get("append-system-prompt-file")
+    assert file_arg, "oversized append must use --append-system-prompt-file"
+    content = Path(file_arg).read_text(encoding="utf-8")
+    assert big_system in content
+
+
+def test_small_system_prompt_stays_inline(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    from hermes_claude_code.config import get_config
+
+    cfg = get_config()
+    conv = prepare_conversation(
+        {
+            "messages": [
+                {"role": "system", "content": "You are terse."},
+                {"role": "user", "content": "hi"},
+            ]
+        },
+        cfg,
+    )
+    options, _ = ClaudeBridge(cfg)._build_options(conv)
+    assert "You are terse." in options.system_prompt["append"]
+    assert not (options.extra_args or {}).get("append-system-prompt-file")
