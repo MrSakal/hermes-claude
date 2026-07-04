@@ -249,7 +249,7 @@ wheels = [
 
 [[package]]
 name = "hermes-claude-code"
-version = "0.3.6"
+version = "0.3.7"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
