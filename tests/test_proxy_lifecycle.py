@@ -75,7 +75,7 @@ def test_proxy_start_stop_smoke(monkeypatch, tmp_path):
         # /v1/models reachable end-to-end
         resp = httpx.get(cfg.base_url + "/models", timeout=5)
         assert resp.status_code == 200
-        assert any(m["id"] == "claude-sonnet-4-6" for m in resp.json()["data"])
+        assert any(m["id"] == "sonnet" for m in resp.json()["data"])
     finally:
         proxy.stop_proxy(cfg)
 
