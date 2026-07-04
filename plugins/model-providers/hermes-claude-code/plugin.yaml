@@ -1,5 +1,5 @@
 name: hermes-claude-code
 kind: model-provider
-version: "0.3.5"
+version: "0.3.6"
 description: "Claude Code via local OpenAI-compatible Hermes bridge"
 author: Nous Research

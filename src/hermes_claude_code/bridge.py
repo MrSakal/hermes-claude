@@ -752,6 +752,10 @@ _API_BILLING_ENV_VARS = (
     "ANTHROPIC_BASE_URL",
 )
 
+# Single-argv safety margin: Linux caps one exec argument at ~128KiB
+# (MAX_ARG_STRLEN); stay well below and switch to --append-system-prompt-file.
+_MAX_INLINE_SYSTEM_PROMPT_BYTES = 60_000
+
 
 class ClaudeBridge:
     """Drives Claude Code via the SDK, falling back to the ``claude`` CLI."""
@@ -767,6 +771,34 @@ class ClaudeBridge:
         except Exception:
             return str(workdir)
         return str(workdir)
+
+    def _system_append_file(self, text: str) -> str:
+        """Write an oversized system-prompt append to disk; return its path.
+
+        The SDK/CLI pass ``--append-system-prompt`` as a single process
+        argument, and Linux caps one argv entry at ~128KiB (MAX_ARG_STRLEN) —
+        a full Hermes system prompt (memory + skills) exceeds that and the
+        exec fails with ``[Errno 7] Argument list too long`` (reproduced by
+        the diagnose matrix at the 50k-token case). ``--append-system-prompt-
+        file`` reads the same text from a file with no size cap.
+        """
+        import time as _time
+        import uuid as _uuid
+
+        directory = self.config.run_dir / "sysprompts"
+        directory.mkdir(parents=True, exist_ok=True)
+        # Opportunistic GC: requests are short-lived; anything older than
+        # 10 minutes is finished and safe to drop.
+        cutoff = _time.time() - 600
+        for old in directory.glob("append-*.txt"):
+            try:
+                if old.stat().st_mtime < cutoff:
+                    old.unlink()
+            except OSError:
+                pass
+        path = directory / f"append-{_uuid.uuid4().hex}.txt"
+        path.write_text(text, encoding="utf-8")
+        return str(path)
 
     # -- auth env hygiene -------------------------------------------------- #
     def _backend_env(self) -> dict[str, str] | None:
@@ -904,7 +936,16 @@ class ClaudeBridge:
 
         preset: dict[str, Any] = {"type": "preset", "preset": "claude_code"}
         if system_appends:
-            preset["append"] = "\n\n".join(system_appends)
+            append_text = "\n\n".join(system_appends)
+            if len(append_text.encode("utf-8")) > _MAX_INLINE_SYSTEM_PROMPT_BYTES:
+                kwargs["extra_args"] = {
+                    **(kwargs.get("extra_args") or {}),
+                    "append-system-prompt-file": self._system_append_file(
+                        append_text
+                    ),
+                }
+            else:
+                preset["append"] = append_text
         kwargs["system_prompt"] = preset
         return ClaudeAgentOptions(**kwargs), captured
 
@@ -1090,7 +1131,14 @@ class ClaudeBridge:
 
         cmd = [claude, "-p", "--output-format", "json", "--model", conv.backend_model]
         if conv.system_prompt:
-            cmd += ["--append-system-prompt", conv.system_prompt]
+            # Same argv-size guard as the SDK path (Linux MAX_ARG_STRLEN).
+            if len(conv.system_prompt.encode("utf-8")) > _MAX_INLINE_SYSTEM_PROMPT_BYTES:
+                cmd += [
+                    "--append-system-prompt-file",
+                    self._system_append_file(conv.system_prompt),
+                ]
+            else:
+                cmd += ["--append-system-prompt", conv.system_prompt]
         if conv.cwd:
             cmd += ["--add-dir", conv.cwd]
         if conv.resume:
