@@ -75,7 +75,8 @@ something:
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `HERMES_CLAUDE_CODE_PORT` | `35345` | Local proxy port |
-| `HERMES_CLAUDE_CODE_MODELS` | `sonnet,haiku,opus,fable` | Comma-separated model list shown in the picker. Entries can be the built-in display names or raw Claude Code selectors (`sonnet[1m]`, `opusplan`, …) passed through as-is. Stick to aliases — pinned model IDs like `claude-sonnet-4-6` are billed as **extra usage**, not your subscription. |
+| `HERMES_CLAUDE_CODE_MODELS` | `claude-sonnet-4-6,claude-haiku-4-5,claude-opus-4-8,claude-fable-5` | Comma-separated model list shown in the picker. Entries can be the built-in display names or raw Claude Code selectors (`sonnet[1m]`, `opusplan`, …) passed through as-is. Stick to aliases — pinned model IDs like `claude-sonnet-4-6` are billed as **extra usage**, not your subscription. |
+| `HERMES_CLAUDE_CODE_CONTEXT_LENGTH` | `200000` | Context window advertised to Hermes. 200k is the subscription-safe boundary: larger requests make Claude Code switch to 1M-context mode, which bills as **extra usage** on every plan (claude-code#28927). Raise only if you have extra-usage credits. |
 | `HERMES_CLAUDE_CODE_MODE` | `strict` | `strict`: Hermes stays in control of tool calls. `agentic`: Claude Code runs tools itself. |
 | `HERMES_CLAUDE_CODE_CWD` | _(none)_ | Working directory Claude Code operates in |
 | `HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION` | `1` | On by default: the backend's environment is scrubbed of `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` so requests always run on your `claude login` subscription. Set to `0` only if you deliberately want an inherited API key to be used (metered billing). |

@@ -98,10 +98,25 @@ def _now() -> int:
 
 
 def models_payload(config: Config) -> dict[str, Any]:
+    # ``context_length`` is read by Hermes (agent/model_metadata.py extracts
+    # it from provider /v1/models listings) and drives its context
+    # compression. Advertising the subscription-safe 200k boundary is
+    # SUBSCRIPTION-CRITICAL: Claude Code silently switches requests larger
+    # than ~200k tokens into 1M-context mode, which since Claude Code v2.1.51
+    # bills as EXTRA USAGE regardless of plan (anthropics/claude-code#28927).
+    # Verified live: identical Hermes setups worked under the boundary
+    # (in≈95k) and failed with "out of extra usage" once the full
+    # toolset/MCP schemas pushed the prompt past it.
     return {
         "object": "list",
         "data": [
-            {"id": m, "object": "model", "created": _now(), "owned_by": MODEL_OWNER}
+            {
+                "id": m,
+                "object": "model",
+                "created": _now(),
+                "owned_by": MODEL_OWNER,
+                "context_length": config.context_length,
+            }
             for m in config.models
         ],
     }
@@ -207,15 +222,29 @@ def create_app(bridge: Any | None = None, config: Config | None = None):
         conv = prepare_conversation(payload, cfg)
         stream = bool(payload.get("stream"))
         names = _tool_names(payload)
+        # ~4 chars/token: coarse but plenty to spot requests near the 200k
+        # subscription boundary (above it Claude Code flips to 1M-context
+        # mode, billed as extra usage — see models_payload).
+        approx_tokens = len(json.dumps(payload, ensure_ascii=False)) // 4
         logger.info(
-            "chat.completions request model=%s stream=%s messages=%d tools=%d tool_names=%s mode=%s",
+            "chat.completions request model=%s stream=%s messages=%d tools=%d "
+            "approx_tokens=%d tool_names=%s mode=%s",
             conv.model,
             stream,
             len(payload.get("messages") or []),
             len(names),
+            approx_tokens,
             ",".join(names[:30]),
             conv.mode,
         )
+        if approx_tokens > cfg.context_length:
+            logger.warning(
+                "request ~%d tokens exceeds advertised context_length=%d — "
+                "Claude Code will switch to 1M-context mode, which bills as "
+                "EXTRA USAGE; expect a 400 unless extra usage is enabled",
+                approx_tokens,
+                cfg.context_length,
+            )
         preemptive = preemptive_host_tool_call(conv)
         if preemptive is not None:
             logger.info(
