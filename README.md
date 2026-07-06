@@ -41,6 +41,10 @@ model:
 
 Or just pick it interactively with `hermes model`.
 
+Hermes' auxiliary work (context compression, vision summaries, memory
+flushes) defaults to `haiku` through this same proxy — same subscription,
+no separate aux provider to configure.
+
 ## Which models can I pick?
 
 The picker offers [Claude Code's official model aliases](https://code.claude.com/docs/en/model-config)
@@ -86,6 +90,9 @@ hermes-claude-code doctor --live   # also sends a real test message
 The same commands also work as `hermes claude-code ...` and, inside a Hermes
 session, as `/claude-code`.
 
+The proxy logs to `$HERMES_HOME/logs/hermes-claude-code.log` — that's where
+`approx_tokens` values and context-limit rejections show up.
+
 ## Configuration
 
 Everything has a sane default — you only need these if you want to change
@@ -93,12 +100,15 @@ something:
 
 | Variable | Default | What it does |
 | --- | --- | --- |
+| `HERMES_CLAUDE_CODE_HOST` | `127.0.0.1` | Local proxy bind address |
 | `HERMES_CLAUDE_CODE_PORT` | `35345` | Local proxy port |
 | `HERMES_CLAUDE_CODE_MODELS` | `sonnet,opus,haiku,fable,best,opusplan` | Comma-separated model list shown in the picker. Entries can be official model IDs, aliases (`sonnet`, `opus`, …) or raw selectors (`sonnet[1m]`, `opusplan`) — all passed through as-is. |
 | `HERMES_CLAUDE_CODE_CONTEXT_LENGTH` | `200000` | Context window advertised to Hermes. 200k is the subscription-safe boundary: larger requests make Claude Code switch to 1M-context mode, which bills as **extra usage** on every plan (claude-code#28927). Raise only if you have extra-usage credits. |
 | `HERMES_CLAUDE_CODE_ENFORCE_CONTEXT_LIMIT` | `1` | Fail-closed guard: requests estimated over the context window are rejected with a 400 instead of forwarded into 1M-context (extra-usage) mode. Set to `0` to restore warn-and-forward. |
 | `HERMES_CLAUDE_CODE_MODE` | `strict` | `strict`: Hermes stays in control of tool calls. `agentic`: Claude Code runs tools itself. |
-| `HERMES_CLAUDE_CODE_CWD` | _(none)_ | Working directory Claude Code operates in |
+| `HERMES_CLAUDE_CODE_CWD` | _(none)_ | Working directory Claude Code operates in. When unset, the backend runs in an isolated empty directory on purpose — don't point it at a real project unless you want Claude Code to read it. |
+| `HERMES_CLAUDE_CODE_TIMEOUT` | `600` | Per-request timeout (seconds) |
+| `HERMES_CLAUDE_CODE_STARTUP_TIMEOUT` | `30` | How long to wait for the proxy to come up (seconds) |
 | `HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION` | `1` | On by default: the backend's environment is scrubbed of `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` so requests always run on your `claude login` subscription. Set to `0` only if you deliberately want an inherited API key to be used (metered billing). |
 
 ⚠️ **Don't set `ANTHROPIC_API_KEY` anywhere near this plugin.** If it's set,

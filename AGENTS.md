@@ -15,6 +15,28 @@ After this procedure: `hermes model` lists **Claude Code** as a provider, and
 selecting it serves real chat completions, billed against the user's Claude
 subscription (`claude login`) — never an Anthropic API key.
 
+## What gets installed where
+
+`hermes-claude-code install` writes **two** plugin directories — Hermes has
+two separate discovery subsystems and this plugin needs both:
+
+| Path (under `$HERMES_HOME`) | Subsystem | Purpose | Opt-in? |
+| --- | --- | --- | --- |
+| `plugins/model-providers/hermes-claude-code/` | provider discovery (`providers._discover_providers`) | Puts "Claude Code" in `hermes model`, serves completions | No — always on once present |
+| `plugins/hermes-claude-code/` | general PluginManager | `on_session_start` proxy autostart, `/claude-code` slash command, `hermes claude-code` CLI | Yes — needs `hermes plugins enable` (the installer does this for you) |
+
+Both are thin shims that import the pip-installed `hermes_claude_code`
+package — which is why step 1 (pip, into Hermes' interpreter) must come
+first and why copying these directories alone is never enough.
+
+Runtime artifacts (created on first use, safe to delete when the proxy is
+stopped): `$HERMES_HOME/run/hermes-claude-code.proxy.pid` and
+`run/hermes-claude-code.lock` (proxy lifecycle), `run/workdir/` (the
+isolated empty cwd the backend runs in — keep it empty; putting files there
+leaks them into prompts), `run/sysprompts/` (oversized system-prompt
+spill files, auto-GC'd), and `logs/hermes-claude-code.log` (proxy log —
+check here for `approx_tokens` and context-limit rejections).
+
 ## Before you start: find the right Python environment
 
 Hermes' plugin discovery requires this package to be importable in the
@@ -74,6 +96,11 @@ plugin. It prints a JSON result; check `"general_plugin_enabled"`:
 <that-python> -c "from providers import list_providers; print('hermes-claude-code' in [p.name for p in list_providers()])"
 ```
 Must print `True`. If it prints `False`, see Troubleshooting.
+
+Note: `hermes plugins list` will show **two** entries for this plugin (the
+flat standalone one and the `model-providers/...` one, kind
+`model-provider`). That is the expected dual-surface layout described above,
+not a duplicate install.
 
 ### 3. Authenticate
 
@@ -152,6 +179,8 @@ an error.
 | Provider responds to direct/manual selection (`config.yaml` or `--provider`) but doesn't appear as a choice in the **TUI or desktop app** picker | `auth_type` isn't `"api_key"`. Verified in `hermes_cli/models.py`: the `CANONICAL_PROVIDERS` list those pickers actually read explicitly skips `auth_type in {oauth_device_code, oauth_external, external_process, aws_sdk, copilot}` ("non-api-key flows need bespoke picker UX"). This is a DIFFERENT list from `providers.list_providers()`/`PROVIDER_REGISTRY` — a provider can be fully functional while invisible in just this one picker. | Confirm `python -c "from hermes_claude_code.provider import build_profile; print(build_profile().auth_type)"` prints `api_key`; if not, the installed version predates this repo's `external_process` → `api_key` switch — reinstall from the current commit. `tests/test_provider.py::test_auth_type_is_selectable_in_the_tui_desktop_picker` guards against regressing this. |
 | Windows: install "succeeds" but nothing shows up anywhere | Custom script assumed `$HERMES_HOME` defaults to `~/.hermes` | On Windows the real default is `%LOCALAPPDATA%\hermes` — this package's own `hermes_home()` already matches that (verified live), so just make sure nothing else in the flow hardcodes `~/.hermes` |
 | `doctor` shows the SDK missing | Installed without the `[sdk]` extra | Re-run step 1 with `[sdk]` included in the pip spec |
+| Enable "succeeded" but the hook/slash/CLI extras never activate | Both plugin entries share the name `hermes-claude-code`, and `hermes plugins enable` resolves by first match — in rare orderings it can enable the `model-providers/hermes-claude-code` key instead of the flat one | Check `plugins.enabled` in Hermes' `config.yaml` (in `$HERMES_HOME`): it must contain the flat key `hermes-claude-code`. If only `model-providers/hermes-claude-code` is there, add the flat key by hand |
+| Requests rejected with `context_length_exceeded` | Fail-closed subscription guard: the request was estimated over the 200k boundary (above it Claude Code bills as extra usage) | Working as designed — check `approx_tokens` in `$HERMES_HOME/logs/hermes-claude-code.log`. Shrink the toolset/context, or (deliberately, with extra-usage credits) raise `HERMES_CLAUDE_CODE_CONTEXT_LENGTH` / set `HERMES_CLAUDE_CODE_ENFORCE_CONTEXT_LIMIT=0` |
 
 ## Uninstall
 
