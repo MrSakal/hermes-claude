@@ -27,11 +27,25 @@ def test_usage_to_openai_folds_cache_tokens_into_prompt():
             "output_tokens": 42,
         }
     )
+    # prompt_tokens stays cache-inclusive (Hermes' context accounting needs
+    # the total), while the cache-read share is broken out via the standard
+    # OpenAI detail field so cached input isn't cost-weighted as fresh.
     assert usage == {
         "prompt_tokens": 100,
         "completion_tokens": 42,
         "total_tokens": 142,
+        "prompt_tokens_details": {"cached_tokens": 85},
     }
+
+
+def test_usage_to_openai_omits_details_without_cache_reads():
+    usage = usage_to_openai({"input_tokens": 10, "output_tokens": 2})
+    assert usage == {
+        "prompt_tokens": 10,
+        "completion_tokens": 2,
+        "total_tokens": 12,
+    }
+    assert "prompt_tokens_details" not in usage
 
 
 def test_usage_to_openai_rejects_empty_and_non_dict_shapes():

@@ -87,40 +87,12 @@ def test_first_turn_url_text_response_becomes_hermes_web_extract_call():
     assert recovered.tool_calls[0]["function"]["name"] == "web_extract"
 
 
-def test_hermes_home_listing_request_preemptively_uses_search_files():
-    conv = prepare_conversation(
-        {
-            "model": "Sonnet 4.6",
-            "messages": [
-                {"role": "user", "content": "Ez mit tud? https://github.com/carpdiem/hermes-bridge"},
-                {"role": "assistant", "content": "Rövid összefoglaló."},
-                {
-                    "role": "user",
-                    "content": "Omm néz meg hogy a hermes ben milyen mappákat látsz?",
-                },
-            ],
-            "tools": [
-                {"type": "function", "function": {"name": "search_files", "parameters": {}}}
-            ],
-        },
-        Config(),
-    )
-
-    preemptive = preemptive_host_tool_call(conv)
-
-    assert preemptive is not None
-    assert preemptive.finish_reason == "tool_calls"
-    call = preemptive.tool_calls[0]
-    assert call["function"]["name"] == "search_files"
-    assert json.loads(call["function"]["arguments"]) == {
-        "pattern": "*",
-        "target": "files",
-        "path": "~/.hermes",
-        "limit": 80,
-    }
-
-
-def test_hermes_home_listing_request_does_not_repeat_after_tool_result():
+def test_keyword_only_request_is_not_preempted():
+    # No URL in the prompt → no deterministic preemption; the model itself
+    # decides whether a tool is needed. (A keyword-triggered heuristic that
+    # forced search_files on "hermes folder"-ish phrasing used to live here —
+    # removed as over-fitted: it hijacked ordinary questions that merely
+    # mentioned those words.)
     conv = prepare_conversation(
         {
             "model": "Sonnet 4.6",
@@ -128,22 +100,6 @@ def test_hermes_home_listing_request_does_not_repeat_after_tool_result():
                 {
                     "role": "user",
                     "content": "Omm néz meg hogy a hermes ben milyen mappákat látsz?",
-                },
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": "call_0_search_files",
-                            "type": "function",
-                            "function": {"name": "search_files", "arguments": "{}"},
-                        }
-                    ],
-                },
-                {
-                    "role": "tool",
-                    "tool_call_id": "call_0_search_files",
-                    "content": '{"matches": ["/home/hermes/.hermes/skills"]}',
                 },
             ],
             "tools": [

@@ -165,6 +165,15 @@ class Config:
     # via HERMES_CLAUDE_CODE_CONTEXT_LENGTH only if you have extra-usage
     # credits and want long-context requests.
     context_length: int = 200_000
+    # When True (the default), requests estimated to exceed context_length are
+    # REJECTED with a 400 instead of forwarded — fail-closed. Forwarding one
+    # would flip Claude Code into 1M-context mode (extra-usage billing on
+    # every plan), so the guaranteed-subscription contract requires an error,
+    # never a surprise bill. Hermes normally compresses context to the
+    # advertised window, so this only fires on accounting mismatches. Opt out
+    # with HERMES_CLAUDE_CODE_ENFORCE_CONTEXT_LIMIT=0 (requests then pass
+    # through with a log warning, as before).
+    enforce_context_limit: bool = True
     fallback_models: tuple = FALLBACK_MODELS
     models: tuple = DEFAULT_MODELS
 
@@ -231,4 +240,7 @@ def get_config() -> Config:
         force_subscription=_env_bool("HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION", True),
         models=_env_models(MODELS_ENV_VAR, DEFAULT_MODELS),
         context_length=_env_int("HERMES_CLAUDE_CODE_CONTEXT_LENGTH", 200_000),
+        enforce_context_limit=_env_bool(
+            "HERMES_CLAUDE_CODE_ENFORCE_CONTEXT_LIMIT", True
+        ),
     )

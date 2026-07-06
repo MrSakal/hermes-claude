@@ -1,6 +1,6 @@
 [project]
 name = "hermes-claude-code"
-version = "0.3.8"
+version = "0.4.0"
 description = "Hermes model provider backed by Claude Code (local OpenAI-compatible bridge)"
 readme = "README.md"
 requires-python = ">=3.11"
