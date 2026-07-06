@@ -226,15 +226,19 @@ class Conversation:
     )
 
 
-def usage_to_openai(usage: Any) -> dict[str, int] | None:
+def usage_to_openai(usage: Any) -> dict[str, Any] | None:
     """Normalise Claude Code usage into the OpenAI ``usage`` object.
 
     Claude Code reports Anthropic-style counters (``input_tokens``,
     ``output_tokens``, plus cache read/creation splits). Hermes consumes the
     OpenAI shape, and its context/cost accounting needs prompt tokens to
     include the cached share — so the cache counters fold into
-    ``prompt_tokens``. Returns None for empty/unknown shapes so callers can
-    distinguish "no data" from a genuine zero-token response.
+    ``prompt_tokens``. The cache-read share is additionally surfaced as
+    ``prompt_tokens_details.cached_tokens`` (the standard OpenAI field Hermes'
+    usage normaliser reads), so cached and fresh input tokens are accounted
+    separately instead of all billing-weighted as fresh. Returns None for
+    empty/unknown shapes so callers can distinguish "no data" from a genuine
+    zero-token response.
     """
     if not isinstance(usage, dict):
         return None
@@ -243,19 +247,23 @@ def usage_to_openai(usage: Any) -> dict[str, int] | None:
         value = usage.get(key)
         return int(value) if isinstance(value, (int, float)) else 0
 
+    cache_read = _count("cache_read_input_tokens")
     prompt = (
         _count("input_tokens")
         + _count("cache_creation_input_tokens")
-        + _count("cache_read_input_tokens")
+        + cache_read
     )
     completion = _count("output_tokens")
     if prompt == 0 and completion == 0:
         return None
-    return {
+    result: dict[str, Any] = {
         "prompt_tokens": prompt,
         "completion_tokens": completion,
         "total_tokens": prompt + completion,
     }
+    if cache_read:
+        result["prompt_tokens_details"] = {"cached_tokens": cache_read}
+    return result
 
 
 @dataclass
@@ -267,7 +275,7 @@ class BridgeResult:
     backend: str = "sdk"
     reasoning_content: str = ""
     # OpenAI-shaped usage from the backend, or None when unreported.
-    usage: dict[str, int] | None = None
+    usage: dict[str, Any] | None = None
 
     @property
     def has_tool_calls(self) -> bool:
@@ -295,15 +303,7 @@ class BridgeResult:
             seen.add(name)
         if not merged:
             return self
-        return BridgeResult(
-            text="",
-            tool_calls=merged,
-            finish_reason="tool_calls",
-            session_id=self.session_id,
-            backend=self.backend,
-            reasoning_content=self.reasoning_content,
-            usage=self.usage,
-        )
+        return replace(self, text="", tool_calls=merged, finish_reason="tool_calls")
 
 
 class ClaudeCodeAPIError(RuntimeError):
@@ -382,10 +382,6 @@ def _assistant_error_to_exception(message: Any) -> ClaudeCodeAPIError | None:
 _URL_RE = re.compile(r"https?://[^\s<>'\")]+")
 _NATIVE_PERMISSION_RE = re.compile(
     r"(enged[eé]lyt|j[oó]v[aá]hagy|permission|approve|webfetch|\bgh\b|raw\.githubusercontent)",
-    re.IGNORECASE,
-)
-_HERMES_HOME_LISTING_RE = re.compile(
-    r"\bhermes\b.*(mapp|folder|director|k[oö]nyvt[aá]r|l[aá]tsz|list|néz|nez)",
     re.IGNORECASE,
 )
 
@@ -492,15 +488,7 @@ def apply_tool_choice(conv: "Conversation", result: "BridgeResult") -> "BridgeRe
     if kind == "none":
         if not result.tool_calls:
             return result
-        return BridgeResult(
-            text=result.text,
-            tool_calls=[],
-            finish_reason="stop",
-            session_id=result.session_id,
-            backend=result.backend,
-            reasoning_content=result.reasoning_content,
-            usage=result.usage,
-        )
+        return replace(result, tool_calls=[], finish_reason="stop")
     if kind == "function" and name and result.tool_calls:
         kept = [
             tc
@@ -509,27 +497,13 @@ def apply_tool_choice(conv: "Conversation", result: "BridgeResult") -> "BridgeRe
         ]
         if kept == result.tool_calls:
             return result
-        return BridgeResult(
+        return replace(
+            result,
             text="" if kept else result.text,
             tool_calls=kept,
             finish_reason="tool_calls" if kept else "stop",
-            session_id=result.session_id,
-            backend=result.backend,
-            reasoning_content=result.reasoning_content,
-            usage=result.usage,
         )
     return result
-
-
-def _latest_user_segment(prompt: str) -> str:
-    if "User:" not in prompt:
-        return prompt
-    return prompt.rsplit("User:", 1)[-1]
-
-
-def _latest_user_text(prompt: str) -> str:
-    latest = _latest_user_segment(prompt)
-    return latest.split("\n", 1)[0].strip()
 
 
 def _host_tool_call_for_url(conv: Conversation) -> BridgeResult | None:
@@ -558,46 +532,12 @@ def _host_tool_call_for_url(conv: Conversation) -> BridgeResult | None:
     )
 
 
-def _host_tool_call_for_hermes_home_listing(conv: Conversation) -> BridgeResult | None:
-    if conv.mode != "strict" or not isinstance(conv.prompt, str):
-        return None
-    available = _tool_names(conv.tools)
-    latest_segment = _latest_user_segment(conv.prompt)
-    latest = latest_segment.split("\n", 1)[0].strip()
-    already_called = (
-        "Assistant called tool search_files" in latest_segment
-        or "Tool result for search_files" in latest_segment
-    )
-    if (
-        already_called
-        or "search_files" not in available
-        or not _HERMES_HOME_LISTING_RE.search(latest)
-    ):
-        return None
-    return BridgeResult(
-        text="",
-        tool_calls=[
-            mcp_server.tool_use_to_openai(
-                name="search_files",
-                arguments={
-                    "pattern": "*",
-                    "target": "files",
-                    "path": "~/.hermes",
-                    "limit": 80,
-                },
-                index=0,
-            )
-        ],
-        finish_reason="tool_calls",
-    )
-
-
 def preemptive_host_tool_call(conv: Conversation) -> BridgeResult | None:
     """Return an immediate Hermes host-tool call for deterministic cases."""
     # tool_choice="none" forbids any tool call; never preempt with one.
     if normalize_tool_choice(conv.tool_choice)[0] == "none":
         return None
-    return _host_tool_call_for_url(conv) or _host_tool_call_for_hermes_home_listing(conv)
+    return _host_tool_call_for_url(conv)
 
 
 def _recover_host_tool_call(conv: Conversation, result: BridgeResult) -> BridgeResult:
@@ -634,15 +574,7 @@ def _recover_host_tool_call(conv: Conversation, result: BridgeResult) -> BridgeR
         )
     else:
         return result
-    return BridgeResult(
-        text="",
-        tool_calls=[call],
-        finish_reason="tool_calls",
-        session_id=result.session_id,
-        backend=result.backend,
-        reasoning_content=result.reasoning_content,
-        usage=result.usage,
-    )
+    return replace(result, text="", tool_calls=[call], finish_reason="tool_calls")
 
 
 def prepare_conversation(payload: dict[str, Any], config: Config) -> Conversation:
@@ -950,85 +882,29 @@ class ClaudeBridge:
         return ClaudeAgentOptions(**kwargs), captured
 
     async def _complete_sdk(self, conv: Conversation) -> BridgeResult:
-        from claude_agent_sdk import (
-            AssistantMessage,
-            ResultMessage,
-            TextBlock,
-            ThinkingBlock,
-            ToolUseBlock,
-            query,
-        )
+        """Non-streaming completion, implemented as a ``_stream_sdk`` consumer.
 
-        options, captured = self._build_options(conv)
+        ``_stream_sdk`` already collects text/tool calls, applies every
+        post-pass (captured MCP calls, host-tool recovery, tool_choice), and
+        only emits text after those passes — so the non-streaming API is just
+        its consumer. One SDK code path to maintain instead of two copies.
+        """
         text_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        tool_calls: list[dict[str, Any]] = []
-        session_id: str | None = None
-        result_text: str | None = None
-        usage: dict[str, int] | None = None
-
-        try:
-            async for message in query(prompt=conv.prompt, options=options):
-                if isinstance(message, AssistantMessage):
-                    exc = _assistant_error_to_exception(message)
-                    if exc is not None:
-                        raise exc
-                    for block in message.content:
-                        if isinstance(block, TextBlock):
-                            text_parts.append(block.text)
-                        elif isinstance(block, ThinkingBlock):
-                            reasoning_parts.append(block.thinking)
-                        elif isinstance(block, ToolUseBlock):
-                            if not mcp_server.is_hermes_mcp_tool_name(block.name):
-                                continue
-                            tool_calls.append(
-                                mcp_server.tool_use_to_openai(
-                                    name=mcp_server.strip_mcp_prefix(block.name),
-                                    arguments=block.input,
-                                    index=len(tool_calls),
-                                    call_id=block.id,
-                                )
-                            )
-                elif isinstance(message, ResultMessage):
-                    session_id = message.session_id
-                    result_text = message.result
-                    usage = usage_to_openai(getattr(message, "usage", None))
-                    if message.is_error:
-                        # Graceful partial: the model already produced usable
-                        # content (text/thinking/tool call) but the run ended
-                        # in an error state — commonly the claude_code preset
-                        # nudging the model to attempt a tool that isn't
-                        # available here. Deliver what we have instead of
-                        # discarding a good answer over a post-hoc error.
-                        if text_parts or tool_calls:
-                            logger.info(
-                                "tolerating errored ResultMessage with content: %s",
-                                _result_error_detail(message),
-                            )
-                        else:
-                            raise ClaudeCodeAPIError(
-                                _result_error_detail(message),
-                                message.api_error_status,
-                            )
-        except Exception as exc:
-            if "maximum number of turns" not in str(exc).lower() or not (captured or tool_calls):
-                raise
-
-        text = "".join(text_parts) or (result_text or "")
-        _raise_if_claude_api_error(text)
-        finish = "tool_calls" if (tool_calls and conv.mode == "strict") else "stop"
-        result = BridgeResult(
-            text="" if finish == "tool_calls" else text,
-            tool_calls=tool_calls if conv.mode == "strict" else [],
-            finish_reason=finish,
-            session_id=session_id,
+        done: dict[str, Any] = {}
+        async for evt in self._stream_sdk(conv):
+            if evt.get("type") == "text" and evt.get("text"):
+                text_parts.append(evt["text"])
+            elif evt.get("type") == "done":
+                done = evt
+        return BridgeResult(
+            text="".join(text_parts),
+            tool_calls=done.get("tool_calls") or [],
+            finish_reason=done.get("finish_reason", "stop"),
+            session_id=done.get("session_id"),
             backend="sdk",
-            reasoning_content="".join(reasoning_parts),
-            usage=usage,
+            reasoning_content=done.get("reasoning_content") or "",
+            usage=done.get("usage"),
         )
-        result = result.with_captured_tool_calls(captured, mode=conv.mode)
-        result = _recover_host_tool_call(conv, result)
-        return apply_tool_choice(conv, result)
 
     async def _stream_sdk(self, conv: Conversation) -> AsyncIterator[dict[str, Any]]:
         from claude_agent_sdk import (

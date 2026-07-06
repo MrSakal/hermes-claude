@@ -238,6 +238,34 @@ def create_app(bridge: Any | None = None, config: Config | None = None):
             conv.mode,
         )
         if approx_tokens > cfg.context_length:
+            if cfg.enforce_context_limit:
+                # Fail-closed subscription guard: forwarding this request
+                # would flip Claude Code into 1M-context mode, which bills as
+                # EXTRA USAGE on every plan (claude-code#28927). An error the
+                # user sees beats a bill the user never approved. The ~4
+                # chars/token estimate over-counts JSON, so this triggers
+                # early rather than late — the safe direction.
+                logger.warning(
+                    "rejecting request: ~%d tokens exceeds context_length=%d "
+                    "(fail-closed; set HERMES_CLAUDE_CODE_ENFORCE_CONTEXT_LIMIT=0 "
+                    "to forward anyway)",
+                    approx_tokens,
+                    cfg.context_length,
+                )
+                return JSONResponse(
+                    status_code=400,
+                    content=error_payload(
+                        f"Request of ~{approx_tokens} tokens exceeds the "
+                        f"{cfg.context_length}-token subscription-safe boundary. "
+                        "Above it Claude Code switches to 1M-context mode, which "
+                        "bills as extra usage on every plan, so the proxy refuses "
+                        "rather than risk a surprise bill. Reduce the context "
+                        "(Hermes compresses to the advertised context window), or "
+                        "opt out with HERMES_CLAUDE_CODE_ENFORCE_CONTEXT_LIMIT=0 / "
+                        "raise HERMES_CLAUDE_CODE_CONTEXT_LENGTH deliberately.",
+                        code="context_length_exceeded",
+                    ),
+                )
             logger.warning(
                 "request ~%d tokens exceeds advertised context_length=%d — "
                 "Claude Code will switch to 1M-context mode, which bills as "

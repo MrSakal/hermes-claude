@@ -80,6 +80,20 @@ def run_doctor(config: Config | None = None, live: bool = False) -> dict[str, An
             "set HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION=1 to have the bridge ignore it."
         )
 
+    # Hermes' auxiliary "auto" chain (vision summaries, context compression,
+    # memory flushes) silently falls back to the next configured provider when
+    # this one errors or is unreachable — and that fallback bills at metered
+    # rates. Surface any key that would catch that traffic so "subscription
+    # only" stays a deliberate choice rather than an assumption.
+    if os.environ.get("OPENROUTER_API_KEY"):
+        warnings.append(
+            "OPENROUTER_API_KEY is set — Hermes' auxiliary 'auto' fallback chain "
+            "can route vision/compression/memory-flush calls to OpenRouter "
+            "(metered billing) whenever this provider errors or is down. Pin "
+            "auxiliary providers in ~/.hermes/config.yaml if those must stay on "
+            "the subscription."
+        )
+
     if not sdk and not cli:
         checks.append(
             _check(False, "backend", "no Claude Code backend available")

@@ -58,8 +58,11 @@ the current list.
 One thing that IS size-dependent: requests above ~200k tokens flip Claude
 Code into 1M-context mode, which bills as **extra usage** on every plan.
 The proxy advertises a 200k context window so Hermes compresses context to
-stay under it — if you see "out of extra usage" with a huge toolset, check
-the proxy log's `approx_tokens` value.
+stay under it — and requests estimated over the boundary are **rejected with
+a clear error instead of forwarded** (fail-closed: an error beats a surprise
+bill). If a huge toolset trips this, check the proxy log's `approx_tokens`
+value; `HERMES_CLAUDE_CODE_ENFORCE_CONTEXT_LIMIT=0` restores the old
+warn-and-forward behaviour.
 
 After a plugin upgrade, a still-running old proxy is detected by version and
 replaced automatically — no manual stop/start needed.
@@ -93,6 +96,7 @@ something:
 | `HERMES_CLAUDE_CODE_PORT` | `35345` | Local proxy port |
 | `HERMES_CLAUDE_CODE_MODELS` | `sonnet,opus,haiku,fable,best,opusplan` | Comma-separated model list shown in the picker. Entries can be official model IDs, aliases (`sonnet`, `opus`, …) or raw selectors (`sonnet[1m]`, `opusplan`) — all passed through as-is. |
 | `HERMES_CLAUDE_CODE_CONTEXT_LENGTH` | `200000` | Context window advertised to Hermes. 200k is the subscription-safe boundary: larger requests make Claude Code switch to 1M-context mode, which bills as **extra usage** on every plan (claude-code#28927). Raise only if you have extra-usage credits. |
+| `HERMES_CLAUDE_CODE_ENFORCE_CONTEXT_LIMIT` | `1` | Fail-closed guard: requests estimated over the context window are rejected with a 400 instead of forwarded into 1M-context (extra-usage) mode. Set to `0` to restore warn-and-forward. |
 | `HERMES_CLAUDE_CODE_MODE` | `strict` | `strict`: Hermes stays in control of tool calls. `agentic`: Claude Code runs tools itself. |
 | `HERMES_CLAUDE_CODE_CWD` | _(none)_ | Working directory Claude Code operates in |
 | `HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION` | `1` | On by default: the backend's environment is scrubbed of `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` so requests always run on your `claude login` subscription. Set to `0` only if you deliberately want an inherited API key to be used (metered billing). |
