@@ -72,17 +72,56 @@ except Exception:  # pragma: no cover - depends on runtime
 class ClaudeCodeProviderProfile(_BaseProfile):
     """Provider profile that fetches its model list from the local proxy.
 
-    ``ProviderProfile`` has three other overridable hooks per Hermes' model-
-    provider plugin docs: ``prepare_messages``, ``build_extra_body``, and
-    ``build_api_kwargs_extras``. These exist for providers whose outbound
-    wire format needs a client-side tweak (extra body fields, non-standard
-    kwargs, message massaging) before Hermes' own HTTP client sends the
-    request. We deliberately don't override them: our proxy accepts a plain,
-    unmodified OpenAI ``chat/completions`` request and does every Claude Code
-    -specific translation itself, server-side, in ``bridge.py``. Leaving
-    these at the base class' pass-through defaults is the correct choice for
-    us, not an oversight.
+    Of ``ProviderProfile``'s overridable request hooks we deliberately keep
+    ``prepare_messages`` and ``build_extra_body`` at their pass-through
+    defaults: our proxy accepts a plain OpenAI ``chat/completions`` request
+    and does every Claude Code-specific translation server-side in
+    ``bridge.py``. ``build_api_kwargs_extras`` IS overridden — it is the ONLY
+    channel through which Hermes' ``reasoning_effort`` setting reaches a
+    chat_completions provider (Hermes core only wires reasoning for
+    hardcoded provider branches: Kimi/Gemini/OpenRouter/...), so without it
+    the user's reasoning setting would silently never reach Claude Code.
     """
+
+    # Hermes reasoning_effort levels (hermes_constants.VALID_REASONING_EFFORTS:
+    # none/minimal/low/medium/high/xhigh) → the bridge's accepted efforts
+    # (low/medium/high/xhigh/max). "minimal" has no Claude Code equivalent and
+    # degrades to "low"; "none"/disabled sends nothing (no thinking).
+    _EFFORT_MAP = {
+        "minimal": "low",
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "max": "max",
+    }
+
+    def build_api_kwargs_extras(
+        self,
+        *,
+        reasoning_config: dict | None = None,
+        **context: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Forward Hermes' reasoning effort as top-level ``reasoning_effort``.
+
+        The proxy's bridge reads exactly this field and turns it into Claude
+        Code's ``effort`` + adaptive thinking. Top-level (not extra_body)
+        mirrors Hermes' own Kimi branch, so the OpenAI client accepts it.
+        The ``supports_reasoning`` context flag is intentionally ignored —
+        it gates OpenRouter-style ``extra_body.reasoning`` forwarding to
+        third-party upstreams and is always False for a localhost provider;
+        our own proxy safely accepts the field.
+        """
+        if not isinstance(reasoning_config, dict):
+            return {}, {}
+        if reasoning_config.get("enabled") is False:
+            return {}, {}
+        effort = self._EFFORT_MAP.get(
+            str(reasoning_config.get("effort") or "").strip().lower()
+        )
+        if effort is None:
+            return {}, {}
+        return {}, {"reasoning_effort": effort}
 
     def fetch_models(
         self,

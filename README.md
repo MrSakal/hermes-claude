@@ -64,6 +64,13 @@ the proxy log's `approx_tokens` value.
 After a plugin upgrade, a still-running old proxy is detected by version and
 replaced automatically — no manual stop/start needed.
 
+## Reasoning effort
+
+Hermes' `agent.reasoning_effort` setting (config.yaml or the in-session
+override) flows through to Claude Code as its `effort` level with adaptive
+thinking. Valid levels map 1:1 (`low`/`medium`/`high`/`xhigh`); Hermes'
+`minimal` degrades to `low`, and `none`/`false` disables thinking.
+
 ## Managing the proxy
 
 ```bash

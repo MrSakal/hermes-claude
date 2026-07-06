@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 from .config import get_config
 from .doctor import format_report, run_doctor
@@ -21,7 +22,26 @@ from .install import install, uninstall
 from .proxy import ensure_proxy_running, proxy_status, stop_proxy
 
 
+def _utf8_stdout() -> None:
+    """Make stdout/stderr never crash on the ✓/✗/⚠ marks doctor prints.
+
+    Windows consoles and pipes often default to a legacy code page (cp1250,
+    cp437, ...) that cannot encode those marks — ``print`` then dies with
+    ``UnicodeEncodeError`` and the doctor/diagnose report is replaced by a
+    traceback (observed live on a Hungarian-locale Windows 11). Prefer UTF-8;
+    at minimum degrade unencodable characters to replacements.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            # Non-reconfigurable stream (test harness StringIO, ...) — leave
+            # it alone; worst case is the pre-existing behavior.
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_stdout()
     parser = argparse.ArgumentParser(prog="hermes-claude-code")
     sub = parser.add_subparsers(dest="action")
     i = sub.add_parser(

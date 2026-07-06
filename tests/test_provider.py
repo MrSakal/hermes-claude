@@ -110,6 +110,61 @@ def test_register_returns_profile(monkeypatch):
     assert os.environ[BASE_URL_ENV_VAR] == "http://127.0.0.1:40999/v1"
 
 
+# ── reasoning_effort forwarding ─────────────────────────────────────────────
+# Hermes' agent.reasoning_effort (config.yaml / TUI override) reaches a
+# chat_completions provider ONLY via ProviderProfile.build_api_kwargs_extras
+# — core only wires reasoning for hardcoded branches (Kimi, Gemini,
+# OpenRouter). Without our override the setting silently never reaches the
+# proxy. The bridge reads a top-level "reasoning_effort" payload field.
+
+
+def test_reasoning_effort_forwarded_top_level():
+    p = provider.build_profile(Config())
+    extra_body, top_level = p.build_api_kwargs_extras(
+        reasoning_config={"enabled": True, "effort": "high"}
+    )
+    assert extra_body == {}
+    assert top_level == {"reasoning_effort": "high"}
+
+
+def test_reasoning_effort_minimal_maps_to_low():
+    # Hermes allows "minimal"; Claude Code doesn't — degrade, don't drop.
+    p = provider.build_profile(Config())
+    _, top_level = p.build_api_kwargs_extras(
+        reasoning_config={"enabled": True, "effort": "minimal"}
+    )
+    assert top_level == {"reasoning_effort": "low"}
+
+
+def test_reasoning_disabled_sends_nothing():
+    # reasoning_effort: none/false → {"enabled": False}; no field at all so
+    # the bridge doesn't enable thinking.
+    p = provider.build_profile(Config())
+    assert p.build_api_kwargs_extras(
+        reasoning_config={"enabled": False}
+    ) == ({}, {})
+
+
+def test_reasoning_absent_or_unknown_sends_nothing():
+    p = provider.build_profile(Config())
+    assert p.build_api_kwargs_extras(reasoning_config=None) == ({}, {})
+    assert p.build_api_kwargs_extras(
+        reasoning_config={"enabled": True, "effort": "bogus"}
+    ) == ({}, {})
+
+
+def test_reasoning_hook_ignores_supports_reasoning_flag():
+    # supports_reasoning gates OpenRouter-style extra_body forwarding and is
+    # always False for a localhost base_url — it must not suppress our own
+    # top-level field.
+    p = provider.build_profile(Config())
+    _, top_level = p.build_api_kwargs_extras(
+        reasoning_config={"enabled": True, "effort": "medium"},
+        supports_reasoning=False,
+    )
+    assert top_level == {"reasoning_effort": "medium"}
+
+
 def test_register_does_not_override_user_env(monkeypatch):
     # A user-provided key/base URL must win over our placeholder defaults.
     monkeypatch.setenv(API_KEY_ENV_VAR, "user-key")
