@@ -21,6 +21,7 @@ directory layout each expects):
 from __future__ import annotations
 
 import json
+import sys
 from typing import Any
 
 from .config import get_config
@@ -75,6 +76,21 @@ def _cli_setup(parser) -> None:
     )
 
 
+def _print_safe(text: str) -> None:
+    """Print, degrading unencodable characters instead of crashing.
+
+    This runs inside the HOST Hermes process, so unlike the standalone CLI we
+    must not reconfigure its stdout. Legacy Windows code pages (cp1250, ...)
+    can't encode the ✓/✗/⚠ marks in the doctor report — fall back to
+    replacement characters rather than a UnicodeEncodeError traceback.
+    """
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+        print(text.encode(encoding, "replace").decode(encoding))
+
+
 def _cli_handler(args) -> int:
     cfg = get_config()
     action = getattr(args, "cc_action", None) or "status"
@@ -84,7 +100,7 @@ def _cli_handler(args) -> int:
         print(json.dumps(stop_proxy(cfg), indent=2))
     elif action == "doctor":
         report = run_doctor(cfg, live=getattr(args, "live", False))
-        print(format_report(report))
+        _print_safe(format_report(report))
         return 0 if report["ok"] else 1
     else:
         print(_status_text())
