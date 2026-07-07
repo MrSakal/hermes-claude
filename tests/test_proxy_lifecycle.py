@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 import httpx
+import pytest
 
 from hermes_claude_code import proxy
 from hermes_claude_code.config import Config
@@ -47,12 +48,52 @@ def test_status_not_running(monkeypatch, tmp_path):
 
 
 def test_ensure_proxy_running_already_running(monkeypatch):
+    # The mocked health MUST carry the current version: a missing "version"
+    # parses as (0,) — i.e. "outdated" — and ensure_proxy_running then goes
+    # down the replace path, SIGTERMing whatever pid is in the pid file.
+    # Observed live: this test's versionless mock killed the user's REAL
+    # running proxy ("replacing outdated proxy (running=None, ...)").
     cfg = Config(port=4)
     monkeypatch.setattr(
-        proxy, "health_check", lambda *a, **k: {"status": "ok"}
+        proxy,
+        "health_check",
+        lambda *a, **k: {"status": "ok", "version": proxy.__version__},
+    )
+    monkeypatch.setattr(
+        proxy,
+        "stop_proxy",
+        lambda *a, **k: pytest.fail(
+            "a current-version proxy must never be stopped/replaced"
+        ),
     )
     out = proxy.ensure_proxy_running(cfg)
     assert out["status"] == "already-running"
+    assert "stale" not in out
+
+
+def test_create_app_logs_inside_hermes_home():
+    # Regression: _setup_logging must resolve HERMES_HOME at app-creation
+    # time. Before the hermetic-home fixture, the first create_app() of a
+    # pytest session opened a FileHandler on the REAL
+    # %LOCALAPPDATA%/hermes/logs/hermes-claude-code.log and — because
+    # _setup_logging returns early once handlers exist — pinned it there for
+    # every later test, writing test tracebacks into the user's install.
+    import logging
+    import os
+    from pathlib import Path
+
+    from .conftest import FakeBridge
+
+    home = Path(os.environ["HERMES_HOME"])  # set by _hermetic_hermes_home
+    proxy.create_app(bridge=FakeBridge(), config=Config(port=free_port()))
+    handlers = [
+        h
+        for h in logging.getLogger("hermes_claude_code").handlers
+        if isinstance(h, logging.FileHandler)
+    ]
+    assert handlers, "create_app must configure the package file handler"
+    for handler in handlers:
+        assert Path(handler.baseFilename).is_relative_to(home)
 
 
 def test_proxy_start_stop_smoke(monkeypatch, tmp_path):
