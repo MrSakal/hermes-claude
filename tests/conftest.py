@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import socket
 from typing import Any
 
@@ -15,6 +16,43 @@ def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def _reset_package_logger() -> None:
+    # Only the plugin's own FileHandler — pytest's log-capture handlers also
+    # live on this logger (propagate=False takes it out of root capture) and
+    # closing those would break pytest itself.
+    package_logger = logging.getLogger("hermes_claude_code")
+    for handler in list(package_logger.handlers):
+        if isinstance(handler, logging.FileHandler):
+            package_logger.removeHandler(handler)
+            handler.close()
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_hermes_home(tmp_path, monkeypatch):
+    """Keep every test away from the real Hermes installation.
+
+    Config's path properties resolve ``hermes_home()`` lazily, so anything a
+    test triggers — the proxy's file logging (``create_app`` →
+    ``_setup_logging``), pid/lock files in the lifecycle helpers, the
+    bridge's ``run/workdir`` mkdir — lands in the REAL user install unless
+    HERMES_HOME points elsewhere. Observed live: test tracebacks written into
+    ``%LOCALAPPDATA%/hermes/logs/hermes-claude-code.log`` and
+    ``ensure_proxy_running`` SIGTERMing the user's running proxy through the
+    real pid file.
+
+    Also resets the package logger around each test: ``_setup_logging``
+    returns early once a handler exists, so a FileHandler opened by one test
+    would otherwise pin its path (worst case: the real log) for the rest of
+    the session. And publishes a random free port so nothing that reads
+    ``get_config()`` defaults to the real proxy's port.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    monkeypatch.setenv("HERMES_CLAUDE_CODE_PORT", str(free_port()))
+    _reset_package_logger()
+    yield
+    _reset_package_logger()
 
 
 class FakeBridge:
