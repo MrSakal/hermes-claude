@@ -47,7 +47,12 @@ def _setup_logging(cfg: Config) -> None:
     bridge self-healing, ...) land in the same file.
     """
     package_logger = logging.getLogger("hermes_claude_code")
-    if package_logger.handlers:
+    # Idempotency guard: only OUR FileHandler counts. Checking for any
+    # handler at all silently disabled file logging whenever a host attached
+    # its own handler to this logger (seen live: pytest's log-capture
+    # handlers land here because propagate=False below takes this logger out
+    # of root capture).
+    if any(isinstance(h, logging.FileHandler) for h in package_logger.handlers):
         return
     cfg.log_file.parent.mkdir(parents=True, exist_ok=True)
     handler = logging.FileHandler(cfg.log_file, encoding="utf-8")
