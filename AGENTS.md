@@ -1,198 +1,522 @@
-# AGENTS.md — installing this plugin autonomously
+# AGENTS.md — autonomous installation runbook
 
-This file is written for an AI coding agent (e.g. Claude Code) asked to
-install this plugin into a user's Hermes environment. It is deliberately
-explicit and procedural: exact commands, exact success/failure checks, and a
-troubleshooting table for what's actually been seen to go wrong. Every claim
-here has been verified against a real Hermes install, not just its docs.
+This document is the execution contract for an AI agent installing, updating, verifying, or removing `hermes-claude-code`.
 
-If you are a human reading this: it's the same instructions, just written
-step-by-step instead of narratively. `README.md` is the short version.
+Use exact commands, preserve user data, do not expose credentials, and do not report success until the end-to-end verification passes.
 
-## Goal
+## Target state
 
-After this procedure: `hermes model` lists **Claude Code** as a provider, and
-selecting it serves real chat completions, billed against the user's Claude
-subscription (`claude login`) — never an Anthropic API key.
+The installation is complete only when all of the following are true:
 
-## What gets installed where
+1. `hermes_claude_code` imports in the Python environment used by Hermes.
+2. Both Hermes discovery shims exist under the active `$HERMES_HOME`.
+3. The general plugin is enabled.
+4. Claude Code OAuth authentication is active.
+5. `HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION=1` is effective.
+6. The local proxy is healthy.
+7. `hermes model` can discover the Claude Code provider and readable model labels.
+8. A real low-risk Hermes → proxy → Claude Code request succeeds.
 
-`hermes-claude-code install` writes **two** plugin directories — Hermes has
-two separate discovery subsystems and this plugin needs both:
+## Non-negotiable constraints
 
-| Path (under `$HERMES_HOME`) | Subsystem | Purpose | Opt-in? |
-| --- | --- | --- | --- |
-| `plugins/model-providers/hermes-claude-code/` | provider discovery (`providers._discover_providers`) | Puts "Claude Code" in `hermes model`, serves completions | No — always on once present |
-| `plugins/hermes-claude-code/` | general PluginManager | `on_session_start` proxy autostart, `/claude-code` slash command, `hermes claude-code` CLI | Yes — needs `hermes plugins enable` (the installer does this for you) |
+- Install into Hermes' Python environment, not an arbitrary system Python.
+- Authenticate with `claude login` or `CLAUDE_CODE_OAUTH_TOKEN`.
+- Never request, print, store in logs, or commit OAuth tokens or API keys.
+- Keep `HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION=1` unless the user explicitly requests metered API routing.
+- Do not add raw pinned model IDs or 1M selectors unless the user explicitly accepts extra usage.
+- Back up existing Hermes configuration before mutation.
+- Use the package installer followed by `hermes_claude_code.cli install`; copying only plugin YAML files is incomplete.
+- Restart the proxy and active Hermes runtime after package/schema/environment changes.
+- Verify actual execution; import checks alone are insufficient.
 
-Both are thin shims that import the pip-installed `hermes_claude_code`
-package — which is why step 1 (pip, into Hermes' interpreter) must come
-first and why copying these directories alone is never enough.
+## Installation layout
 
-Runtime artifacts (created on first use, safe to delete when the proxy is
-stopped): `$HERMES_HOME/run/hermes-claude-code.proxy.pid` and
-`run/hermes-claude-code.lock` (proxy lifecycle), `run/workdir/` (the
-isolated empty cwd the backend runs in — keep it empty; putting files there
-leaks them into prompts), `run/sysprompts/` (oversized system-prompt
-spill files, auto-GC'd), and `logs/hermes-claude-code.log` (proxy log —
-check here for `approx_tokens` and context-limit rejections).
+The package is installed into Hermes' Python environment. Registration creates two lightweight discovery shims:
 
-## Before you start: find the right Python environment
+| Path under `$HERMES_HOME` | Function |
+| --- | --- |
+| `plugins/model-providers/hermes-claude-code/` | Registers the Claude Code model provider |
+| `plugins/hermes-claude-code/` | Adds proxy autostart, CLI/slash integration, and session hook |
 
-Hermes' plugin discovery requires this package to be importable in the
-**exact same Python interpreter** that runs the `hermes` command. Find it
-first — installing into the wrong environment is the single most common
-failure mode.
+Runtime files:
+
+| Path under `$HERMES_HOME` | Function |
+| --- | --- |
+| `run/hermes-claude-code.proxy.pid` | Proxy PID metadata |
+| `run/hermes-claude-code.lock` | Lifecycle lock |
+| `run/workdir/` | Isolated default Claude Code working directory |
+| `run/sysprompts/` | Temporary oversized system prompts |
+| `logs/hermes-claude-code.log` | Proxy requests, token estimates, usage, and errors |
+
+## Phase 1 — discover the active Hermes installation
+
+### 1. Locate Hermes
+
+POSIX:
 
 ```bash
-which hermes        # or: where hermes   (Windows)
+command -v hermes
+hermes --version
+hermes config path
+hermes config env-path
 ```
 
-Whatever that resolves to (e.g. `.../hermes-agent/venv/Scripts/hermes`), the
-matching Python is in the same directory
-(`.../hermes-agent/venv/Scripts/python.exe` or `.../venv/bin/python`). Use
-**that** interpreter's `pip` for step 1 below — not a random `pip`/`pip3` on
-`PATH`, and not this repo's own dev venv.
+PowerShell:
 
-```bash
-# Confirm you found it:
-<that-python> -c "import providers, hermes_cli; print('ok')"
-```
-If that fails, you have the wrong interpreter — keep looking (check
-`HERMES_HOME`, ask the user, or look for a venv near wherever `hermes-agent`
-is installed).
-
-## Install procedure
-
-Run these **in order**, using the interpreter identified above.
-
-### 1. Install the package
-
-```bash
-<that-python> -m pip install "git+https://github.com/MrS4k4l/hermes-claude.git#egg=hermes-claude-code[sdk]"
+```powershell
+Get-Command hermes
+hermes --version
+hermes config path
+hermes config env-path
 ```
 
-**Check:** `<that-python> -c "import hermes_claude_code; print('ok')"` prints `ok`.
-**If it fails:** re-check you used the right interpreter (previous section).
+Record:
 
-### 2. Register the plugin with Hermes
+- Hermes executable
+- Hermes config path
+- Hermes environment-file path
+- active profile, if any
+- `$HERMES_HOME`
+
+Profile installations use their own config, plugins, and environment. Do not modify another profile unless explicitly requested.
+
+### 2. Locate Hermes' Python
+
+Common paths:
+
+- Linux/macOS: `~/.hermes/hermes-agent/venv/bin/python`
+- Windows: `%LOCALAPPDATA%\hermes\hermes-agent\venv\Scripts\python.exe`
+- Profile/custom install: Python from the corresponding Hermes installation
+
+Set a shell variable and verify imports:
 
 ```bash
-<that-python> -m hermes_claude_code.cli install
-# (or, if the console script is on PATH: hermes-claude-code install)
+HERMES_PY="$HOME/.hermes/hermes-agent/venv/bin/python"
+"$HERMES_PY" -c "import hermes_cli, providers; print('Hermes Python OK')"
 ```
 
-This writes two directories under `$HERMES_HOME/plugins/` and — using
-Hermes' own documented `hermes plugins enable <name>` command — enables the
-plugin. It prints a JSON result; check `"general_plugin_enabled"`:
+PowerShell:
 
-- `true` → done, nothing else to do for this step.
-- `false` with a `"next_step"` key → run that exact command yourself
-  (`hermes plugins enable hermes-claude-code --no-allow-tool-override`; keep
-  the `--no-allow-tool-override` flag — see "Do not" below for why).
-
-**Check:**
-```bash
-<that-python> -c "from providers import list_providers; print('hermes-claude-code' in [p.name for p in list_providers()])"
+```powershell
+$HermesPy = "$env:LOCALAPPDATA\hermes\hermes-agent\venv\Scripts\python.exe"
+& $HermesPy -c "import hermes_cli, providers; print('Hermes Python OK')"
 ```
-Must print `True`. If it prints `False`, see Troubleshooting.
 
-Note: `hermes plugins list` will show **two** entries for this plugin (the
-flat standalone one and the `model-providers/...` one, kind
-`model-provider`). That is the expected dual-surface layout described above,
-not a duplicate install.
+Do not continue until both imports succeed.
 
-### 3. Authenticate
+### 3. Resolve `$HERMES_HOME`
 
-**The only auth method for this plugin is `claude login` (or its headless
-equivalent below). Never an API key.**
+Use `HERMES_HOME` when set. Otherwise:
 
-- **Interactive** (a human is present with a browser):
-  ```bash
-  claude login
-  ```
-- **Headless / server** (no browser on this machine — e.g. installing on a
-  remote server on the user's behalf): run `claude setup-token` once,
-  *anywhere with a browser* (can be a completely different machine), which
-  prints a long-lived OAuth token. Set that token as an environment variable
-  wherever Hermes/this plugin actually runs:
-  ```bash
-  export CLAUDE_CODE_OAUTH_TOKEN="<token from claude setup-token>"
-  ```
-  This is still the user's subscription, not an API key — `claude setup-token`
-  is part of the same OAuth flow as `claude login`, just non-interactive.
+- Linux/macOS: `~/.hermes`
+- Windows: `%LOCALAPPDATA%\hermes`
 
-**Do not** set `ANTHROPIC_API_KEY` anywhere in this process. If you see it
-already set in the environment you're installing into, warn the user and
-recommend either unsetting it or setting
-`HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION=1` (which makes the bridge strip it
-from the Claude Code subprocess specifically, without touching the rest of
-their environment).
+Do not hardcode `~/.hermes` on Windows.
 
-### 4. Verify end to end
+## Phase 2 — prerequisite checks
+
+Run:
 
 ```bash
+hermes doctor
+claude --version
+git --version
+"$HERMES_PY" --version
+"$HERMES_PY" -m pip --version
+```
+
+Required outcomes:
+
+- Hermes executes.
+- Claude Code CLI executes.
+- Git executes.
+- Hermes Python is 3.11 or newer.
+- `pip` is available in Hermes' Python.
+
+If `pip` is unavailable, use the environment's supported package bootstrap procedure before continuing. Do not install the package into a different Python as a workaround.
+
+## Phase 3 — backup
+
+Create a timestamped backup before changing package registration or environment configuration.
+
+POSIX template:
+
+```bash
+set -euo pipefail
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+BACKUP="$HERMES_HOME/backups/hermes-claude-code-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$BACKUP"
+[ -f "$HERMES_HOME/config.yaml" ] && cp -p "$HERMES_HOME/config.yaml" "$BACKUP/config.yaml"
+[ -f "$HERMES_HOME/.env" ] && cp -p "$HERMES_HOME/.env" "$BACKUP/.env"
+[ -d "$HERMES_HOME/plugins/hermes-claude-code" ] && cp -a "$HERMES_HOME/plugins/hermes-claude-code" "$BACKUP/"
+[ -d "$HERMES_HOME/plugins/model-providers/hermes-claude-code" ] && \
+  mkdir -p "$BACKUP/model-providers" && \
+  cp -a "$HERMES_HOME/plugins/model-providers/hermes-claude-code" "$BACKUP/model-providers/"
+printf '%s\n' "$BACKUP"
+```
+
+Do not print the contents of `.env`.
+
+## Phase 4 — install the package
+
+Install the SDK extra from the canonical repository:
+
+```bash
+"$HERMES_PY" -m pip install --upgrade \
+  "git+https://github.com/MrS4k4l/hermes-claude.git#egg=hermes-claude-code[sdk]"
+```
+
+For a deterministic deployment, pin a reviewed commit:
+
+```bash
+COMMIT="<verified commit SHA>"
+"$HERMES_PY" -m pip install --upgrade --force-reinstall --no-deps \
+  "git+https://github.com/MrS4k4l/hermes-claude.git@$COMMIT#egg=hermes-claude-code[sdk]"
+```
+
+Verify package metadata and import:
+
+```bash
+"$HERMES_PY" -m pip show hermes-claude-code
+"$HERMES_PY" -c "import hermes_claude_code; print(hermes_claude_code.__file__)"
+"$HERMES_PY" -m pip check
+```
+
+If installed from Git, verify the recorded commit without exposing credentials:
+
+```bash
+"$HERMES_PY" - <<'PY'
+import importlib.metadata, json
+from pathlib import Path
+
+dist = importlib.metadata.distribution("hermes-claude-code")
+path = Path(dist._path) / "direct_url.json"
+data = json.loads(path.read_text())
+print(data.get("url"))
+print((data.get("vcs_info") or {}).get("commit_id"))
+PY
+```
+
+## Phase 5 — register with Hermes
+
+Run the package's installer:
+
+```bash
+"$HERMES_PY" -m hermes_claude_code.cli install
+```
+
+Validate both paths:
+
+```bash
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+test -d "$HERMES_HOME/plugins/hermes-claude-code"
+test -d "$HERMES_HOME/plugins/model-providers/hermes-claude-code"
+```
+
+Validate provider discovery:
+
+```bash
+"$HERMES_PY" - <<'PY'
+from providers import list_providers
+names = [p.name for p in list_providers()]
+print(names)
+assert "hermes-claude-code" in names
+PY
+```
+
+Validate plugin enablement:
+
+```bash
+hermes plugins list --plain
+```
+
+If the installer reports `general_plugin_enabled: false`, execute its printed `next_step`. The non-interactive form is:
+
+```bash
+hermes plugins enable hermes-claude-code --no-allow-tool-override
+```
+
+## Phase 6 — authentication
+
+### Interactive OAuth
+
+```bash
+claude login
+```
+
+### Headless OAuth
+
+A human generates a token with:
+
+```bash
+claude setup-token
+```
+
+Store it in the service environment or `$HERMES_HOME/.env`:
+
+```dotenv
+CLAUDE_CODE_OAUTH_TOKEN="<OAuth token>"
+```
+
+Do not display the token after storage. Restrict file permissions on POSIX:
+
+```bash
+chmod 600 "$HERMES_HOME/.env"
+```
+
+### Subscription-only environment
+
+Ensure these values are present in the active Hermes environment:
+
+```dotenv
+HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION=1
+HERMES_CLAUDE_CODE_MODELS="Sonnet 5,Opus 4.8,Haiku 4.5,Fable 5,best,opusplan"
+HERMES_CLAUDE_CODE_CONTEXT_LENGTH=200000
+HERMES_CLAUDE_CODE_ENFORCE_CONTEXT_LIMIT=1
+```
+
+Do not print values of unrelated environment variables. Check only whether billing-sensitive names exist:
+
+```bash
+env | cut -d= -f1 | grep -E '^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL)$' || true
+```
+
+The force-subscription guard removes these from the Claude Code subprocess. Remove them from the service environment when they are not needed by another provider.
+
+## Phase 7 — Hermes configuration
+
+Recommended default model:
+
+```yaml
+model:
+  provider: hermes-claude-code
+  default: Sonnet 5
+```
+
+For installations with many MCP/plugin tools:
+
+```yaml
+tools:
+  tool_search:
+    enabled: on
+    search_default_limit: 5
+    max_search_limit: 20
+```
+
+Validate configuration:
+
+```bash
+hermes config check
+```
+
+Do not overwrite the whole config file when a targeted edit is sufficient.
+
+## Phase 8 — restart
+
+Restart the proxy:
+
+```bash
+hermes-claude-code stop || true
+hermes-claude-code start
+```
+
+If the gateway or desktop backend is active:
+
+```bash
+hermes gateway restart
+hermes gateway status
+```
+
+For CLI-only usage, exit the old Hermes process and start a new session. Tool-schema changes require a new session.
+
+## Phase 9 — verification
+
+### 1. Static health
+
+```bash
+hermes-claude-code status
 hermes-claude-code doctor
-hermes -z "hello" --provider hermes-claude-code -m sonnet
+hermes-claude-code models
 ```
 
-The second command is Hermes' own documented smoke test (from its
-model-provider plugin docs) — it should print an actual Claude response, not
-an error.
+Required:
 
-## Do NOT
+- proxy running
+- SDK available
+- Claude OAuth active
+- readable model list returned
 
-- **Do not use the Hermes dashboard's "Install from GitHub" box, or `hermes
-  plugins install <repo>`, for this plugin.** Verified directly against
-  `hermes_cli/plugins_cmd.py`: that installer always clones flat into
-  `$HERMES_HOME/plugins/<name>/` (no awareness of the
-  `plugins/model-providers/<name>/` subdirectory the model-provider half
-  needs) and **never runs `pip install`** — so this plugin's actual code
-  never gets installed. It would look like it worked (`hermes plugins list`
-  shows "installed, enabled") while `hermes model` never lists "Claude Code"
-  and the plugin crashes with `ModuleNotFoundError` the moment Hermes tries
-  to use it. Always use `pip install` + `hermes-claude-code install` instead.
-- **Do not run `hermes plugins enable hermes-claude-code` without
-  `--no-allow-tool-override`.** Verified live: without that flag, the command
-  prompts interactively for any non-bundled plugin and hangs indefinitely
-  when run non-interactively (confirmed — it ran to a 30-second timeout with
-  no output). This plugin never registers a tool, so declining the grant has
-  no functional effect either way.
-- **Do not set `ANTHROPIC_API_KEY`.** It silently overrides the subscription
-  and switches to metered API billing. This is the one thing the user
-  explicitly does not want.
-- **Do not try to make this a single-file / dependency-free plugin** to fit
-  Hermes' GitHub-install flow. It genuinely needs `claude-agent-sdk`,
-  `fastapi`, `uvicorn`, and `httpx` for its full feature set (streaming,
-  native tool bridging, vision). A `pip install` step is an accepted,
-  deliberate tradeoff.
+### 2. Proxy model endpoint
 
-## Troubleshooting
+```bash
+curl -fsS http://127.0.0.1:35345/v1/models
+```
 
-| Symptom | Cause | Fix |
+Expected IDs include:
+
+- `Sonnet 5`
+- `Opus 4.8`
+- `Haiku 4.5`
+- `Fable 5`
+- `best`
+- `opusplan`
+
+Use the configured host/port if defaults were changed.
+
+### 3. Live bridge test
+
+```bash
+hermes-claude-code doctor --live
+```
+
+### 4. Real Hermes request
+
+Use a minimal tool surface for the installation smoke test:
+
+```bash
+hermes chat -q "Reply exactly: CLAUDE-BRIDGE-OK" \
+  --provider hermes-claude-code \
+  -m "Sonnet 5" \
+  -t web \
+  -Q
+```
+
+Required output:
+
+```text
+CLAUDE-BRIDGE-OK
+```
+
+### 5. Log verification
+
+Inspect the latest proxy entries without exposing prompts or credentials:
+
+```bash
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+tail -n 20 "$HERMES_HOME/logs/hermes-claude-code.log"
+```
+
+Confirm:
+
+- request model is the selected readable label
+- request completed successfully
+- no authentication or billing-route error
+- context guard did not reject the smoke test
+
+If Tool Search was enabled, start a fresh normal session and verify the visible surface contains `tool_search`, `tool_describe`, and `tool_call` rather than hundreds of deferred MCP schemas.
+
+## Configuration reference
+
+| Variable | Default | Required handling |
 | --- | --- | --- |
-| `list_providers()` doesn't include `hermes-claude-code` after install | Package not importable in Hermes' actual interpreter | Re-check "Before you start" — reinstall with the correct `pip` |
-| `hermes plugins list` shows it installed+enabled, but `hermes model` never lists it | Installed via the GitHub-install GUI/CLI (flat, no `pip install`) instead of this repo's `install()` | Uninstall that copy, follow the procedure above instead |
-| `hermes-claude-code install` reports `general_plugin_enabled: false` | `hermes` isn't on `PATH` in the environment running the installer, or config is Nix-managed | Run the printed `next_step` command by hand, with `--no-allow-tool-override` |
-| `hermes plugins enable ...` hangs / times out | Missing `--no-allow-tool-override` | Add the flag; it's a no-op for this plugin either way |
-| Chat requests fail with an auth/billing error | `ANTHROPIC_API_KEY` set somewhere, or not logged in | `hermes-claude-code doctor` — it reports exactly this |
-| Provider responds to direct/manual selection (`config.yaml` or `--provider`) but doesn't appear as a choice in the **TUI or desktop app** picker | `auth_type` isn't `"api_key"`. Verified in `hermes_cli/models.py`: the `CANONICAL_PROVIDERS` list those pickers actually read explicitly skips `auth_type in {oauth_device_code, oauth_external, external_process, aws_sdk, copilot}` ("non-api-key flows need bespoke picker UX"). This is a DIFFERENT list from `providers.list_providers()`/`PROVIDER_REGISTRY` — a provider can be fully functional while invisible in just this one picker. | Confirm `python -c "from hermes_claude_code.provider import build_profile; print(build_profile().auth_type)"` prints `api_key`; if not, the installed version predates this repo's `external_process` → `api_key` switch — reinstall from the current commit. `tests/test_provider.py::test_auth_type_is_selectable_in_the_tui_desktop_picker` guards against regressing this. |
-| Windows: install "succeeds" but nothing shows up anywhere | Custom script assumed `$HERMES_HOME` defaults to `~/.hermes` | On Windows the real default is `%LOCALAPPDATA%\hermes` — this package's own `hermes_home()` already matches that (verified live), so just make sure nothing else in the flow hardcodes `~/.hermes` |
-| `doctor` shows the SDK missing | Installed without the `[sdk]` extra | Re-run step 1 with `[sdk]` included in the pip spec |
-| Enable "succeeded" but the hook/slash/CLI extras never activate | Both plugin entries share the name `hermes-claude-code`, and `hermes plugins enable` resolves by first match — in rare orderings it can enable the `model-providers/hermes-claude-code` key instead of the flat one | Check `plugins.enabled` in Hermes' `config.yaml` (in `$HERMES_HOME`): it must contain the flat key `hermes-claude-code`. If only `model-providers/hermes-claude-code` is there, add the flat key by hand |
-| Requests rejected with `context_length_exceeded` | Fail-closed subscription guard: the request was estimated over the 200k boundary (above it Claude Code bills as extra usage) | Working as designed — check `approx_tokens` in `$HERMES_HOME/logs/hermes-claude-code.log`. Shrink the toolset/context, or (deliberately, with extra-usage credits) raise `HERMES_CLAUDE_CODE_CONTEXT_LENGTH` / set `HERMES_CLAUDE_CODE_ENFORCE_CONTEXT_LIMIT=0` |
+| `HERMES_CLAUDE_CODE_HOST` | `127.0.0.1` | Keep loopback unless remote exposure is explicitly required and secured |
+| `HERMES_CLAUDE_CODE_PORT` | `35345` | Change only for conflicts |
+| `HERMES_CLAUDE_CODE_BASE_URL` | local proxy URL | Provider endpoint override |
+| `HERMES_CLAUDE_CODE_API_KEY` | local placeholder | Never replace with an Anthropic key |
+| `HERMES_CLAUDE_CODE_MODELS` | readable model list | Use aliases/display labels for subscription-safe defaults |
+| `HERMES_CLAUDE_CODE_CONTEXT_LENGTH` | `200000` | Keep at subscription-safe boundary unless explicitly approved |
+| `HERMES_CLAUDE_CODE_ENFORCE_CONTEXT_LIMIT` | `1` | Keep enabled for fail-closed behavior |
+| `HERMES_CLAUDE_CODE_MODE` | `strict` | Prefer Hermes-controlled tools |
+| `HERMES_CLAUDE_CODE_CWD` | isolated directory | Set only when project access is intended |
+| `HERMES_CLAUDE_CODE_TIMEOUT` | `600` | Request timeout seconds |
+| `HERMES_CLAUDE_CODE_STARTUP_TIMEOUT` | `30` | Proxy startup timeout seconds |
+| `HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION` | `1` | Keep enabled unless metered routing is explicitly requested |
+| `CLAUDE_CODE_OAUTH_TOKEN` | unset | Secret for headless OAuth; never log or commit |
 
-## Uninstall
+## Tool execution modes
+
+### `strict` — default
+
+- Claude Code chooses tools.
+- Tool calls are returned to Hermes.
+- Hermes executes host tools and returns results.
+- Use for normal Hermes sessions.
+
+### `agentic`
+
+- Claude Code executes its own tools/MCP workflow.
+- Set an explicit `HERMES_CLAUDE_CODE_CWD` when project access is intended.
+- Use only when the user requests Claude Code-managed execution.
+
+## Update procedure
+
+1. Record the currently installed commit/version.
+2. Back up config, `.env`, and both plugin shims.
+3. Resolve and review the target commit.
+4. Reinstall into Hermes' Python.
+5. Rerun the registration installer.
+6. Restart proxy and gateway.
+7. Repeat all verification steps.
+
+Commands:
 
 ```bash
-hermes-claude-code uninstall
+TARGET_COMMIT="<verified commit SHA>"
+"$HERMES_PY" -m pip install --upgrade --force-reinstall --no-deps \
+  "git+https://github.com/MrS4k4l/hermes-claude.git@$TARGET_COMMIT#egg=hermes-claude-code[sdk]"
+"$HERMES_PY" -m hermes_claude_code.cli install
+"$HERMES_PY" -m pip check
+hermes-claude-code stop || true
+hermes-claude-code start
+hermes gateway restart
+hermes-claude-code doctor --live
 ```
 
-Removes both plugin directories from `$HERMES_HOME`. Does not touch
-`config.yaml`'s `plugins.enabled` entry or run `pip uninstall`; if you want
-those gone too:
+## Rollback procedure
+
+Reinstall the previously recorded commit, restore backed-up configuration if it changed, rerun registration, restart, and verify:
 
 ```bash
-hermes plugins disable hermes-claude-code
-<that-python> -m pip uninstall hermes-claude-code
+PREVIOUS_COMMIT="<previous commit SHA>"
+"$HERMES_PY" -m pip install --force-reinstall --no-deps \
+  "git+https://github.com/MrS4k4l/hermes-claude.git@$PREVIOUS_COMMIT#egg=hermes-claude-code[sdk]"
+"$HERMES_PY" -m hermes_claude_code.cli install
+hermes-claude-code stop || true
+hermes-claude-code start
+hermes gateway restart
+hermes-claude-code doctor --live
 ```
+
+## Uninstall procedure
+
+```bash
+hermes-claude-code stop || true
+"$HERMES_PY" -m hermes_claude_code.cli uninstall
+hermes plugins disable hermes-claude-code || true
+"$HERMES_PY" -m pip uninstall hermes-claude-code
+```
+
+Verify both discovery paths are removed. Do not delete OAuth state, Hermes configuration, logs, or backups unless explicitly requested.
+
+## Failure handling
+
+| Failure | Action |
+| --- | --- |
+| Hermes imports fail in selected Python | Stop; locate the correct Hermes interpreter |
+| Package imports fail | Reinstall with `[sdk]`; run `pip check` |
+| Provider absent | Rerun registration; verify both discovery paths and provider import |
+| General plugin disabled | Enable the flat `hermes-claude-code` plugin key |
+| OAuth inactive | Run `claude login` or configure `CLAUDE_CODE_OAUTH_TOKEN` |
+| Proxy unhealthy | Stop/start proxy; inspect the proxy log |
+| Context guard rejects request | Reduce context/tool surface; keep fail-closed protection unless user accepts extra usage |
+| Hundreds of schemas reach the bridge | Enable Hermes Tool Search; start a new session |
+| Web extraction fails for one source | Use another accessible source; do not repeatedly call the identical failing URL |
+| Update fails | Roll back to the recorded commit and restore backup |
+
+## Final report requirements
+
+Report only verified facts:
+
+- Hermes Python path used
+- `$HERMES_HOME` used
+- installed plugin version and commit
+- backup path
+- both discovery paths present
+- OAuth/doctor status without secrets
+- proxy PID/status
+- model list
+- Hermes smoke-test result
+- test result for source changes, if applicable
+- unresolved warnings or blockers
+
+Never report a successful install, update, rollback, or upload without command output confirming it.
