@@ -38,28 +38,25 @@ LOCAL_API_KEY = "hermes-claude-code-local"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 35345
-# The picker exposes Claude Code's OFFICIAL model aliases, exactly as
-# documented at https://code.claude.com/docs/en/model-config. Aliases always
-# resolve to the recommended current model for the installed Claude Code
-# version (e.g. `sonnet` → Sonnet 5 on v2.1.197+, Sonnet 4.6 on older
-# versions; `fable` needs v2.1.170+), so the picker never goes stale.
-# `opusplan` (Opus for plan mode, Sonnet for execution) and `best` (Fable
-# when available, else latest Opus) are documented modes, offered as-is.
-# The 1M-context variants (`sonnet[1m]`, `opus[1m]`) are deliberately NOT in
-# the defaults — 1M-context requests bill as extra usage on every plan; add
-# them via HERMES_CLAUDE_CODE_MODELS if that's an informed choice.
-# The first entry doubles as the default model.
+# The picker shows human-readable labels while routing through Claude Code's
+# official subscription-safe aliases. The installed Claude Code resolves those
+# aliases to its current recommended model (for example, `sonnet` → Sonnet 5
+# on v2.1.197+), so the labels do not pin a billable model ID.
+# `opusplan` (Opus for plan mode, Sonnet for execution) and `best` (Fable when
+# available, else latest Opus) are documented modes and remain selectors.
+# Deliberately omit 1M variants (`sonnet[1m]`, `opus[1m]`): they bill as extra
+# usage on every plan. The first entry doubles as the default model.
 DEFAULT_MODELS = (
-    "sonnet",
-    "opus",
-    "haiku",
-    "fable",
+    "Sonnet 5",
+    "Opus 4.8",
+    "Haiku 4.5",
+    "Fable 5",
     "best",
     "opusplan",
 )
-# Legacy picker entries from previously saved configs/sessions keep routing
-# to a valid selector. (Anything else — full IDs like `claude-opus-4-8`,
-# `sonnet[1m]`, ... — passes through untouched.)
+# Display labels and old picker values map to a supported Claude Code selector.
+# Anything else — full IDs like `claude-opus-4-8`, `sonnet[1m]`, ... — passes
+# through untouched.
 MODEL_ID_ALIASES = {
     "Fable 5": "fable",
     "Opus 4.8": "opus",

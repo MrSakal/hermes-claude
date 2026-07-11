@@ -45,6 +45,14 @@ def test_models_env_override_and_default(monkeypatch):
 
     monkeypatch.delenv("HERMES_CLAUDE_CODE_MODELS", raising=False)
     assert get_config().models == DEFAULT_MODELS
+    assert DEFAULT_MODELS == (
+        "Sonnet 5",
+        "Opus 4.8",
+        "Haiku 4.5",
+        "Fable 5",
+        "best",
+        "opusplan",
+    )
 
     monkeypatch.setenv(
         "HERMES_CLAUDE_CODE_MODELS", "Sonnet 5, sonnet[1m] ,opusplan,"
@@ -54,6 +62,17 @@ def test_models_env_override_and_default(monkeypatch):
     # Whitespace-only value falls back to the defaults instead of an empty picker.
     monkeypatch.setenv("HERMES_CLAUDE_CODE_MODELS", " , ")
     assert get_config().models == DEFAULT_MODELS
+
+
+def test_default_display_model_routes_to_subscription_safe_selector():
+    from hermes_claude_code.bridge import prepare_conversation
+    from hermes_claude_code.config import Config
+
+    conv = prepare_conversation(
+        {"model": "Sonnet 5", "messages": [{"role": "user", "content": "x"}]},
+        Config(),
+    )
+    assert conv.backend_model == "sonnet"
 
 
 def test_custom_model_entries_pass_through_to_backend(monkeypatch):

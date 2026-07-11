@@ -22,7 +22,7 @@ WEB_SEARCH_TOOL = {
 
 def test_model_defaults_to_first_when_absent():
     conv = prepare_conversation({"messages": [{"role": "user", "content": "x"}]}, Config())
-    assert conv.model == "sonnet"
+    assert conv.model == "Sonnet 5"
     assert conv.backend_model == "sonnet"
 
 

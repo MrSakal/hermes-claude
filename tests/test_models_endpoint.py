@@ -20,7 +20,7 @@ def test_models_endpoint(make_client):
     body = resp.json()
     assert body["object"] == "list"
     ids = [m["id"] for m in body["data"]]
-    assert ids == ["sonnet", "opus", "haiku", "fable", "best", "opusplan"]
+    assert ids == ["Sonnet 5", "Opus 4.8", "Haiku 4.5", "Fable 5", "best", "opusplan"]
     for m in body["data"]:
         assert m["object"] == "model"
         assert m["owned_by"] == "anthropic-claude-code"
