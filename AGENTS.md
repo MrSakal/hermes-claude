@@ -12,7 +12,9 @@ Claude Code authentication behavior is documented by [Anthropic](https://code.cl
 ## Install
 
 ```bash
-<hermes-python> -m pip install "git+https://github.com/MrS4k4l/hermes-claude.git"
+git clone <repository-url> hermes-claude
+cd hermes-claude
+<hermes-python> -m pip install .
 hermes-claude-code install
 hermes-claude-code doctor --live
 ```
@@ -38,7 +40,8 @@ Restart an already-running gateway. Confirm `hermes model` lists **Claude Code**
 
 ```bash
 hermes-claude-code stop
-<hermes-python> -m pip install --upgrade "git+https://github.com/MrS4k4l/hermes-claude.git"
+git pull --ff-only
+<hermes-python> -m pip install --upgrade .
 hermes-claude-code install
 hermes-claude-code doctor --live
 ```

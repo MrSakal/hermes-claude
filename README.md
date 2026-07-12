@@ -17,7 +17,9 @@ Hermes provider plugins use `$HERMES_HOME/plugins/model-providers/`; general hoo
 Install into the same Python environment that runs Hermes:
 
 ```bash
-<hermes-python> -m pip install "git+https://github.com/MrS4k4l/hermes-claude.git"
+git clone <repository-url> hermes-claude
+cd hermes-claude
+<hermes-python> -m pip install .
 hermes-claude-code install
 claude login
 hermes-claude-code doctor --live
@@ -31,7 +33,8 @@ Stop the old proxy before replacing the package because 1.0 introduces authentic
 
 ```bash
 hermes-claude-code stop
-<hermes-python> -m pip install --upgrade "git+https://github.com/MrS4k4l/hermes-claude.git"
+git pull --ff-only
+<hermes-python> -m pip install --upgrade .
 hermes-claude-code install
 hermes-claude-code doctor --live
 ```

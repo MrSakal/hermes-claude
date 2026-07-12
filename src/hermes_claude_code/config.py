@@ -13,7 +13,7 @@ PROVIDER_NAME = "hermes-claude-code"
 PROVIDER_ALIASES = ("claude-code-agent", "hermes_claude_code")
 DISPLAY_NAME = "Claude Code"
 DESCRIPTION = "Claude Code subscription via a local Hermes bridge"
-SIGNUP_URL = "https://github.com/MrS4k4l/hermes-claude#install"
+SIGNUP_URL = "https://code.claude.com/docs/en/authentication"
 API_KEY_ENV_VAR = "HERMES_CLAUDE_CODE_API_KEY"
 BASE_URL_ENV_VAR = "HERMES_CLAUDE_CODE_BASE_URL"
 
