@@ -72,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 "\n(general plugin already enabled in config.yaml — no extra step needed)"
             )
+        steps.append("Restart every running Hermes gateway/dashboard process.")
         steps.append("`hermes model` — 'Claude Code' should appear.")
         print("\nNext:")
         for i, step in enumerate(steps, 1):

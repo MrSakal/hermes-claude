@@ -39,6 +39,9 @@ hermes-claude-code install
 hermes-claude-code doctor --live
 ```
 
+Restart every running Hermes gateway/dashboard process after the upgrade. The
+provider credential and curated model catalog are loaded at process startup.
+
 ## Fixed policy
 
 The plugin intentionally has no billing- or security-sensitive settings:
