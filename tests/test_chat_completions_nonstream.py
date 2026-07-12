@@ -60,7 +60,9 @@ def test_nonstream_tool_calls(make_client):
 
 def test_nonstream_tool_calls_logs_host_tool_call(make_client, monkeypatch):
     seen = []
-    monkeypatch.setattr(proxy, "_log_host_tool_calls", lambda origin, calls: seen.append((origin, calls)))
+    monkeypatch.setattr(
+        proxy, "_log_tool_calls", lambda origin, calls: seen.append((origin, calls))
+    )
     tool_call = {
         "id": "call_0_lookup",
         "type": "function",
@@ -73,7 +75,10 @@ def test_nonstream_tool_calls_logs_host_tool_call(make_client, monkeypatch):
 
     resp = client.post(
         "/v1/chat/completions",
-        json={"model": "sonnet", "messages": [{"role": "user", "content": "look it up"}]},
+        json={
+            "model": "sonnet",
+            "messages": [{"role": "user", "content": "look it up"}],
+        },
     )
 
     assert resp.status_code == 200
@@ -100,4 +105,6 @@ def test_bridge_error_maps_to_openai_error(make_client):
     assert resp.status_code == 502
     err = resp.json()["error"]
     assert err["type"] == "server_error"
-    assert "backend down" in err["message"]
+    assert err["message"] == "Claude Code request failed"
+    assert "backend down" not in resp.text
+    assert err["code"]

@@ -10,7 +10,6 @@ from hermes_claude_code.config import (
     BASE_URL_ENV_VAR,
     DISPLAY_NAME,
     FALLBACK_MODELS,
-    LOCAL_API_KEY,
     PROVIDER_ALIASES,
     PROVIDER_NAME,
     SIGNUP_URL,
@@ -102,11 +101,12 @@ def test_register_returns_profile(monkeypatch):
     # rejects an empty key) can wire us up.
     monkeypatch.delenv(API_KEY_ENV_VAR, raising=False)
     monkeypatch.delenv(BASE_URL_ENV_VAR, raising=False)
-    p = provider.register(Config(port=40999))
+    cfg = Config(port=40999)
+    p = provider.register(cfg)
     assert p.name == PROVIDER_NAME
     import os
 
-    assert os.environ[API_KEY_ENV_VAR] == LOCAL_API_KEY
+    assert os.environ[API_KEY_ENV_VAR] == cfg.api_key
     assert os.environ[BASE_URL_ENV_VAR] == "http://127.0.0.1:40999/v1"
 
 
@@ -140,9 +140,7 @@ def test_reasoning_disabled_sends_nothing():
     # reasoning_effort: none/false → {"enabled": False}; no field at all so
     # the bridge doesn't enable thinking.
     p = provider.build_profile(Config())
-    assert p.build_api_kwargs_extras(
-        reasoning_config={"enabled": False}
-    ) == ({}, {})
+    assert p.build_api_kwargs_extras(reasoning_config={"enabled": False}) == ({}, {})
 
 
 def test_reasoning_absent_or_unknown_sends_nothing():
@@ -165,12 +163,12 @@ def test_reasoning_hook_ignores_supports_reasoning_flag():
     assert top_level == {"reasoning_effort": "medium"}
 
 
-def test_register_does_not_override_user_env(monkeypatch):
-    # A user-provided key/base URL must win over our placeholder defaults.
+def test_register_overrides_untrusted_transport_env(monkeypatch):
     monkeypatch.setenv(API_KEY_ENV_VAR, "user-key")
     monkeypatch.setenv(BASE_URL_ENV_VAR, "http://example.invalid/v1")
-    provider.register(Config(port=40998))
+    cfg = Config(port=40998)
+    provider.register(cfg)
     import os
 
-    assert os.environ[API_KEY_ENV_VAR] == "user-key"
-    assert os.environ[BASE_URL_ENV_VAR] == "http://example.invalid/v1"
+    assert os.environ[API_KEY_ENV_VAR] == cfg.api_key
+    assert os.environ[BASE_URL_ENV_VAR] == "http://127.0.0.1:40998/v1"

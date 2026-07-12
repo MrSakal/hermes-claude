@@ -2,12 +2,7 @@
 
 from __future__ import annotations
 
-from hermes_claude_code.bridge import (
-    BridgeResult,
-    messages_to_prompt,
-    prepare_conversation,
-)
-from hermes_claude_code.config import Config
+from hermes_claude_code.bridge import BridgeResult, messages_to_prompt
 
 from .conftest import FakeBridge
 
@@ -22,7 +17,10 @@ def test_tool_result_serialised_into_prompt():
                 {
                     "id": "call_0_get_weather",
                     "type": "function",
-                    "function": {"name": "get_weather", "arguments": '{"city":"Paris"}'},
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": '{"city":"Paris"}',
+                    },
                 }
             ],
         },
@@ -69,18 +67,6 @@ def test_tool_result_name_is_recovered_from_tool_call_id_when_hermes_omits_name(
     assert "Tool result for tool" not in prompt
 
 
-def test_resume_pulled_from_extra_body():
-    conv = prepare_conversation(
-        {
-            "model": "sonnet",
-            "messages": [{"role": "user", "content": "hi"}],
-            "extra_body": {"resume": "sess-123"},
-        },
-        Config(),
-    )
-    assert conv.resume == "sess-123"
-
-
 def test_strict_mode_end_to_end_tool_loop(make_client):
     """First turn yields a tool call; after the tool result, a final answer."""
 
@@ -93,7 +79,10 @@ def test_strict_mode_end_to_end_tool_loop(make_client):
                 {
                     "id": "call_0_get_weather",
                     "type": "function",
-                    "function": {"name": "get_weather", "arguments": '{"city":"Paris"}'},
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": '{"city":"Paris"}',
+                    },
                 }
             ],
             finish_reason="tool_calls",
@@ -109,7 +98,10 @@ def test_strict_mode_end_to_end_tool_loop(make_client):
             "model": "sonnet",
             "messages": [{"role": "user", "content": "weather in Paris?"}],
             "tools": [
-                {"type": "function", "function": {"name": "get_weather", "parameters": {}}}
+                {
+                    "type": "function",
+                    "function": {"name": "get_weather", "parameters": {}},
+                }
             ],
         },
     ).json()

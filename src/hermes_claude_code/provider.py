@@ -9,6 +9,7 @@ remains importable and testable on its own.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -21,13 +22,14 @@ from .config import (
     DESCRIPTION,
     DISPLAY_NAME,
     FALLBACK_MODELS,
-    LOCAL_API_KEY,
     PROVIDER_ALIASES,
     PROVIDER_NAME,
     SIGNUP_URL,
     Config,
     get_config,
 )
+
+logger = logging.getLogger("hermes_claude_code.provider")
 
 try:  # Real Hermes base when available.
     from providers.base import ProviderProfile as _BaseProfile  # type: ignore
@@ -130,32 +132,34 @@ class ClaudeCodeProviderProfile(_BaseProfile):
         base_url: str | None = None,
         timeout: float = 8.0,
     ) -> list[str] | None:
-        # The model list lives on the local proxy. Hermes calls fetch_models()
-        # to populate the picker, which makes it a natural lazy autostart point
-        # so the provider works even when no session hook started the proxy.
         try:
             from .proxy import ensure_proxy_running
 
-            ensure_proxy_running()
-        except Exception:
-            pass  # best-effort; fall through to the curated list on failure
+            outcome = ensure_proxy_running()
+            if outcome.get("status") == "failed":
+                logger.warning(
+                    "proxy autostart failed during model discovery: %s", outcome
+                )
 
-        url = (base_url or self.base_url).rstrip("/") + "/models"
-        try:
-            resp = httpx.get(url, timeout=timeout)
+            url = (base_url or self.base_url).rstrip("/") + "/models"
+            token = api_key or os.environ.get(API_KEY_ENV_VAR, "")
+            resp = httpx.get(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=timeout,
+            )
             resp.raise_for_status()
             data = resp.json()
             items = data.get("data", data) if isinstance(data, dict) else data
             models = [
-                m.get("id")
-                for m in items
-                if isinstance(m, dict) and m.get("id")
+                item.get("id")
+                for item in items
+                if isinstance(item, dict) and item.get("id")
             ]
             if models:
                 return models
-        except Exception:
-            pass
-        # Proxy unreachable — fall back to the curated list.
+        except Exception as exc:
+            logger.warning("model discovery fell back to curated models: %s", exc)
         return list(self.fallback_models)
 
 
@@ -168,13 +172,8 @@ def build_profile(config: Config | None = None) -> ClaudeCodeProviderProfile:
         display_name=DISPLAY_NAME,
         description=DESCRIPTION,
         signup_url=SIGNUP_URL,
-        # ``api_key`` (not ``external_process``): Hermes' auth.py auto-extend
-        # registers any api_key profile with non-empty ``env_vars`` into
-        # PROVIDER_REGISTRY (inference_base_url=base_url, api_key_env_vars and
-        # base_url_env_var derived from env_vars) with no core edits. The
-        # _BASE_URL var is split out as the base-url override; the other becomes
-        # the api-key var. The "key" is a local placeholder — the proxy ignores
-        # it; it never reaches Anthropic and has nothing to do with billing.
+        # This random value authenticates Hermes to the localhost proxy only.
+        # It is never sent to Anthropic; Claude Code uses its OAuth session.
         auth_type="api_key",
         env_vars=(API_KEY_ENV_VAR, BASE_URL_ENV_VAR),
         base_url=cfg.base_url,
@@ -184,28 +183,22 @@ def build_profile(config: Config | None = None) -> ClaudeCodeProviderProfile:
         # below builds that same URL directly anyway.
         supports_health_check=True,
         supports_vision=True,
+        supports_vision_tool_messages=True,
         fallback_models=FALLBACK_MODELS,
         default_aux_model=DEFAULT_AUX_MODEL,
     )
 
 
 def register(config: Config | None = None) -> ClaudeCodeProviderProfile:
-    """Build and register the profile with Hermes (no-op if unavailable).
-
-    Publishing a non-empty placeholder key (and the proxy base URL) into the
-    environment is what lets Hermes' generic api-key resolver wire us up: the
-    key resolver rejects an empty value, and the base-url resolver falls back to
-    the profile's ``base_url`` when the env var is unset (we set it anyway for
-    clarity). ``setdefault`` never overrides a value a user supplied.
-    """
+    """Register the fixed localhost transport with Hermes."""
     cfg = config or get_config()
-    os.environ.setdefault(API_KEY_ENV_VAR, LOCAL_API_KEY)
-    os.environ.setdefault(BASE_URL_ENV_VAR, cfg.base_url)
+    os.environ[API_KEY_ENV_VAR] = cfg.api_key
+    os.environ[BASE_URL_ENV_VAR] = cfg.base_url
     profile = build_profile(cfg)
     try:
         from providers import register_provider  # type: ignore
 
         register_provider(profile)
-    except Exception:
-        pass
+    except ImportError:
+        logger.debug("Hermes provider registry is unavailable")
     return profile

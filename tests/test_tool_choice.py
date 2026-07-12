@@ -8,7 +8,6 @@ from hermes_claude_code.bridge import (
     apply_tool_choice,
     effective_tools,
     normalize_tool_choice,
-    preemptive_host_tool_call,
     prepare_conversation,
 )
 from hermes_claude_code.config import Config
@@ -71,11 +70,11 @@ def test_effective_tools_function_filters_to_named():
     assert [t["function"]["name"] for t in tools] == ["web_search"]
 
 
-def test_effective_tools_unknown_function_keeps_all():
-    tools = effective_tools(
+def test_unknown_forced_function_fails_closed():
+    import pytest
+
+    with pytest.raises(ValueError, match="unavailable tool"):
         _conv({"type": "function", "function": {"name": "does_not_exist"}})
-    )
-    assert len(tools) == 2
 
 
 def test_effective_tools_auto_keeps_all():
@@ -84,7 +83,7 @@ def test_effective_tools_auto_keeps_all():
 
 # -- _build_options wiring -------------------------------------------------- #
 def test_build_options_none_exposes_no_mcp_server():
-    options, _ = ClaudeBridge(Config())._build_options(_conv("none"))
+    options, _, _ = ClaudeBridge(Config())._build_options(_conv("none"))
     # No tools exposed -> no MCP server / allowed_tools wiring.
     assert not getattr(options, "mcp_servers", None)
     # Claude Code's own native tools (Bash/Edit/WebFetch/...) must also be
@@ -94,7 +93,7 @@ def test_build_options_none_exposes_no_mcp_server():
 
 
 def test_build_options_function_directive_and_single_tool():
-    options, _ = ClaudeBridge(Config())._build_options(
+    options, _, _ = ClaudeBridge(Config())._build_options(
         _conv({"type": "function", "function": {"name": "web_search"}})
     )
     assert options.allowed_tools == ["mcp__host-tools__web_search"]
@@ -102,8 +101,11 @@ def test_build_options_function_directive_and_single_tool():
 
 
 def test_build_options_required_directive():
-    options, _ = ClaudeBridge(Config())._build_options(_conv("required"))
-    assert "MUST call one of the available host MCP tools" in options.system_prompt["append"]
+    options, _, _ = ClaudeBridge(Config())._build_options(_conv("required"))
+    assert (
+        "MUST call one of the available host MCP tools"
+        in options.system_prompt["append"]
+    )
 
 
 # -- apply_tool_choice ------------------------------------------------------ #
@@ -139,25 +141,3 @@ def test_apply_required_passes_through_unchanged():
     res = BridgeResult(text="answer", tool_calls=[], finish_reason="stop")
     out = apply_tool_choice(_conv("required"), res)
     assert out is res  # never fabricates a call
-
-
-# -- preemptive guard ------------------------------------------------------- #
-def test_preemptive_suppressed_when_tool_choice_none():
-    # A first-turn URL would normally trigger a preemptive web_extract call.
-    conv = _conv(
-        "none",
-        tools=[WEB_EXTRACT],
-        content="Please read https://example.com/page",
-    )
-    assert preemptive_host_tool_call(conv) is None
-
-
-def test_preemptive_still_fires_when_auto():
-    conv = _conv(
-        "auto",
-        tools=[WEB_EXTRACT],
-        content="Please read https://example.com/page",
-    )
-    pre = preemptive_host_tool_call(conv)
-    assert pre is not None
-    assert pre.tool_calls[0]["function"]["name"] == "web_extract"

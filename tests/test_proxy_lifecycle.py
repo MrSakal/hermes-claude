@@ -57,7 +57,11 @@ def test_ensure_proxy_running_already_running(monkeypatch):
     monkeypatch.setattr(
         proxy,
         "health_check",
-        lambda *a, **k: {"status": "ok", "version": proxy.__version__},
+        lambda *a, **k: {
+            "status": "ok",
+            "version": proxy.__version__,
+            "profile": cfg.profile,
+        },
     )
     monkeypatch.setattr(
         proxy,
@@ -99,7 +103,9 @@ def test_create_app_logs_inside_hermes_home():
 def test_proxy_start_stop_smoke(monkeypatch, tmp_path):
     """Integration: actually spawn the proxy subprocess and hit /health."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    cfg = Config(host="127.0.0.1", port=free_port(), startup_timeout=30.0)
+    from hermes_claude_code.config import get_config
+
+    cfg = get_config()
     try:
         result = proxy.ensure_proxy_running(cfg)
         assert result["status"] in ("started", "already-running")
@@ -114,7 +120,11 @@ def test_proxy_start_stop_smoke(monkeypatch, tmp_path):
         assert health is not None
         assert health["status"] == "ok"
         # /v1/models reachable end-to-end
-        resp = httpx.get(cfg.base_url + "/models", timeout=5)
+        resp = httpx.get(
+            cfg.base_url + "/models",
+            headers={"Authorization": f"Bearer {cfg.api_key}"},
+            timeout=5,
+        )
         assert resp.status_code == 200
         assert any(m["id"] == "Sonnet 5" for m in resp.json()["data"])
     finally:

@@ -1,11 +1,4 @@
-"""Claude Agent SDK bridge with a safe fallback to the ``claude`` CLI.
-
-The bridge turns an OpenAI-style chat-completions payload into a Claude Code
-invocation and returns the assistant text (and any tool-call intents). It
-prefers the ``claude-agent-sdk`` Python API and falls back to shelling out to
-the ``claude`` CLI in ``--print`` mode when the SDK import or API is
-unavailable.
-"""
+"""Subscription-only Claude Agent SDK bridge for Hermes."""
 
 from __future__ import annotations
 
@@ -14,8 +7,9 @@ import json
 import logging
 import os
 import re
-import shutil
+from collections import Counter
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, AsyncIterable, AsyncIterator
 
 from . import mcp_server
@@ -57,7 +51,10 @@ def extract_text(content: Any) -> str:
         return "\n".join(p for p in parts if p)
     return str(content)
 
-_DATA_IMAGE_RE = re.compile(r"^data:(image/[^;,]+);base64,(.*)$", re.IGNORECASE | re.DOTALL)
+
+_DATA_IMAGE_RE = re.compile(
+    r"^data:(image/[^;,]+);base64,(.*)$", re.IGNORECASE | re.DOTALL
+)
 
 
 def _convert_image_url_part(part: dict[str, Any]) -> dict[str, Any] | None:
@@ -115,7 +112,9 @@ def _has_image_block(blocks: list[dict[str, Any]]) -> bool:
     return any(block.get("type") == "image" for block in blocks)
 
 
-async def _single_sdk_user_prompt(content: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+async def _single_sdk_user_prompt(
+    content: list[dict[str, Any]],
+) -> AsyncIterator[dict[str, Any]]:
     yield {
         "type": "user",
         "message": {"role": "user", "content": content},
@@ -156,49 +155,51 @@ def messages_to_prompt(
             return system_prompt, _single_sdk_user_prompt(blocks)
         return system_prompt, extract_text(non_system[0].get("content"))
 
-    lines: list[str] = []
+    blocks: list[dict[str, Any]] = []
     tool_call_names_by_id: dict[str, str] = {}
     for msg in convo:
         role = msg.get("role")
+        text = extract_text(msg.get("content"))
         if role == "user":
-            lines.append(f"User: {extract_text(msg.get('content'))}")
+            blocks.append({"type": "text", "text": f"User: {text}"})
         elif role == "assistant":
-            text = extract_text(msg.get("content"))
-            tool_calls = msg.get("tool_calls") or []
             if text:
-                lines.append(f"Assistant: {text}")
-            for tc in tool_calls:
+                blocks.append({"type": "text", "text": f"Assistant: {text}"})
+            for tc in msg.get("tool_calls") or []:
                 fn = tc.get("function", {}) if isinstance(tc, dict) else {}
                 name = fn.get("name")
                 call_id = tc.get("id") if isinstance(tc, dict) else None
                 if call_id and name:
                     tool_call_names_by_id[str(call_id)] = str(name)
-                lines.append(
-                    f"Assistant called tool {name}({fn.get('arguments')})"
+                blocks.append(
+                    {
+                        "type": "text",
+                        "text": f"Assistant called tool {name}({fn.get('arguments')})",
+                    }
                 )
         elif role == "tool":
             call_id = str(msg.get("tool_call_id") or "")
             name = msg.get("name") or tool_call_names_by_id.get(call_id) or "tool"
-            lines.append(
-                f"Tool result for {name} ({call_id}): "
-                f"{extract_text(msg.get('content'))}"
+            blocks.append(
+                {
+                    "type": "text",
+                    "text": f"Tool result for {name} ({call_id}): {text}",
+                }
             )
-    if lines:
-        lines.append("\nContinue the conversation as the assistant.")
-    prompt_text = "\n".join(lines)
-    image_blocks: list[dict[str, Any]] = []
-    for msg in convo:
-        if msg.get("role") == "user":
-            image_blocks.extend(
+        if role in ("user", "tool"):
+            blocks.extend(
                 block
                 for block in content_to_sdk_blocks(msg.get("content"))
                 if block.get("type") == "image"
             )
-    if image_blocks:
-        return system_prompt, _single_sdk_user_prompt(
-            [{"type": "text", "text": prompt_text}] + image_blocks
-        )
-    return system_prompt, prompt_text
+    blocks.append(
+        {"type": "text", "text": "Continue the conversation as the assistant."}
+    )
+    if _has_image_block(blocks):
+        return system_prompt, _single_sdk_user_prompt(blocks)
+    return system_prompt, "\n".join(
+        str(block.get("text") or "") for block in blocks if block.get("type") == "text"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -212,18 +213,7 @@ class Conversation:
     prompt: str | AsyncIterable[dict[str, Any]]
     tools: list[dict[str, Any]] = field(default_factory=list)
     tool_choice: Any = None
-    temperature: float | None = None
-    max_tokens: int | None = None
     effort: str | None = None
-    cwd: str | None = None
-    resume: str | None = None
-    mode: str = "strict"
-    warnings: list[str] = field(default_factory=list)
-    # Lazily-populated cache for the prompt URL scan (see ``_prompt_urls``).
-    # Excluded from equality/repr so it stays a transparent memo.
-    _url_cache: list[str] | None = field(
-        default=None, compare=False, repr=False
-    )
 
 
 def usage_to_openai(usage: Any) -> dict[str, Any] | None:
@@ -248,11 +238,7 @@ def usage_to_openai(usage: Any) -> dict[str, Any] | None:
         return int(value) if isinstance(value, (int, float)) else 0
 
     cache_read = _count("cache_read_input_tokens")
-    prompt = (
-        _count("input_tokens")
-        + _count("cache_creation_input_tokens")
-        + cache_read
-    )
+    prompt = _count("input_tokens") + _count("cache_creation_input_tokens") + cache_read
     completion = _count("output_tokens")
     if prompt == 0 and completion == 0:
         return None
@@ -282,25 +268,38 @@ class BridgeResult:
         return bool(self.tool_calls)
 
     def with_captured_tool_calls(
-        self, captured: list[dict[str, Any]], *, mode: str
+        self, captured: list[dict[str, Any]]
     ) -> "BridgeResult":
-        """Merge MCP handler captures into OpenAI tool_calls for strict mode."""
-        if mode != "strict" or not captured:
+        """Merge captures without losing repeated calls or duplicating SDK blocks."""
+        if not captured:
             return self
         merged = list(self.tool_calls)
-        seen = {tc.get("function", {}).get("name") for tc in merged}
+        represented = Counter(
+            (
+                str((tc.get("function") or {}).get("name") or ""),
+                str((tc.get("function") or {}).get("arguments") or "{}"),
+            )
+            for tc in merged
+        )
         for call in captured:
             name = str(call.get("name") or "")
-            if not name or name in seen:
+            arguments = call.get("arguments") or {}
+            signature = (
+                name,
+                json.dumps(arguments, ensure_ascii=False, sort_keys=True),
+            )
+            if not name:
+                continue
+            if represented[signature]:
+                represented[signature] -= 1
                 continue
             merged.append(
                 mcp_server.tool_use_to_openai(
                     name=name,
-                    arguments=call.get("arguments") or {},
+                    arguments=arguments,
                     index=len(merged),
                 )
             )
-            seen.add(name)
         if not merged:
             return self
         return replace(self, text="", tool_calls=merged, finish_reason="tool_calls")
@@ -314,7 +313,9 @@ class ClaudeCodeAPIError(RuntimeError):
         self.status_code = status_code
 
 
-def _raise_if_claude_api_error(text: str | None, status_code: int | None = None) -> None:
+def _raise_if_claude_api_error(
+    text: str | None, status_code: int | None = None
+) -> None:
     """Treat Claude Code's textual ``API Error: ...`` payloads as real errors."""
     value = (text or "").strip()
     if not value.startswith("API Error:"):
@@ -379,29 +380,6 @@ def _assistant_error_to_exception(message: Any) -> ClaudeCodeAPIError | None:
     )
 
 
-_URL_RE = re.compile(r"https?://[^\s<>'\")]+")
-_NATIVE_PERMISSION_RE = re.compile(
-    r"(enged[eé]lyt|j[oó]v[aá]hagy|permission|approve|webfetch|\bgh\b|raw\.githubusercontent)",
-    re.IGNORECASE,
-)
-
-
-def _prompt_urls(conv: Conversation) -> list[str]:
-    """URLs in the prompt, scanned once per conversation and cached.
-
-    ``preemptive_host_tool_call`` (proxy) and ``_recover_host_tool_call``
-    (bridge) both probe the prompt for URLs, and the latter used to scan twice
-    in one call. For long multi-turn prompts that regex pass is the dominant
-    per-request cost in the tool-call heuristics; memoising it on the
-    Conversation collapses ~3 full-prompt scans into one.
-    """
-    if not isinstance(conv.prompt, str):
-        return []
-    if conv._url_cache is None:
-        conv._url_cache = _URL_RE.findall(conv.prompt)
-    return conv._url_cache
-
-
 def _tool_name_of(tool: Any) -> str | None:
     if not isinstance(tool, dict):
         return None
@@ -410,15 +388,6 @@ def _tool_name_of(tool: Any) -> str | None:
     else:
         name = tool.get("name")
     return str(name) if name else None
-
-
-def _tool_names(tools: list[dict[str, Any]]) -> set[str]:
-    names: set[str] = set()
-    for tool in tools or []:
-        name = _tool_name_of(tool)
-        if name:
-            names.add(name)
-    return names
 
 
 def normalize_tool_choice(tool_choice: Any) -> tuple[str, str | None]:
@@ -458,8 +427,7 @@ def effective_tools(conv: "Conversation") -> list[dict[str, Any]]:
     if kind == "none":
         return []
     if kind == "function" and name:
-        only = [t for t in conv.tools if _tool_name_of(t) == name]
-        return only or conv.tools
+        return [t for t in conv.tools if _tool_name_of(t) == name]
     return conv.tools
 
 
@@ -506,116 +474,42 @@ def apply_tool_choice(conv: "Conversation", result: "BridgeResult") -> "BridgeRe
     return result
 
 
-def _host_tool_call_for_url(conv: Conversation) -> BridgeResult | None:
-    if conv.mode != "strict" or not isinstance(conv.prompt, str):
-        return None
-    available = _tool_names(conv.tools)
-    if "web_extract" not in available:
-        return None
-    urls = _prompt_urls(conv)
-    if not urls:
-        return None
-    has_tool_result = "Tool result for" in conv.prompt
-    has_prior_assistant = "Assistant:" in conv.prompt or "Assistant called tool" in conv.prompt
-    if has_tool_result or has_prior_assistant:
-        return None
-    return BridgeResult(
-        text="",
-        tool_calls=[
-            mcp_server.tool_use_to_openai(
-                name="web_extract",
-                arguments={"urls": [urls[-1]]},
-                index=0,
-            )
-        ],
-        finish_reason="tool_calls",
-    )
-
-
-def preemptive_host_tool_call(conv: Conversation) -> BridgeResult | None:
-    """Return an immediate Hermes host-tool call for deterministic cases."""
-    # tool_choice="none" forbids any tool call; never preempt with one.
-    if normalize_tool_choice(conv.tool_choice)[0] == "none":
-        return None
-    return _host_tool_call_for_url(conv)
-
-
-def _recover_host_tool_call(conv: Conversation, result: BridgeResult) -> BridgeResult:
-    """Convert missing first-turn URL tool use into a Hermes tool call.
-
-    Claude Code sometimes answers the first turn directly, or asks the user to
-    approve native WebFetch/gh usage, even though Hermes already exposed
-    equivalent host tools. In strict mode that text is not the desired execution
-    path: Hermes should stay the tool executor. If the first user turn contains
-    a URL and ``web_extract`` is available, synthesize the Hermes tool call.
-    """
-    if conv.mode != "strict" or result.tool_calls or result.finish_reason == "tool_calls":
-        return result
-    if not isinstance(conv.prompt, str):
-        return result
-    available = _tool_names(conv.tools)
-    urls = _prompt_urls(conv)
-    first_turn = _host_tool_call_for_url(conv)
-    if first_turn is not None:
-        return first_turn
-    native_permission_chatter = bool(_NATIVE_PERMISSION_RE.search(result.text or ""))
-
-    if urls and "web_extract" in available and native_permission_chatter:
-        call = mcp_server.tool_use_to_openai(
-            name="web_extract",
-            arguments={"urls": [urls[-1]]},
-            index=0,
-        )
-    elif "web_search" in available and native_permission_chatter:
-        call = mcp_server.tool_use_to_openai(
-            name="web_search",
-            arguments={"query": conv.prompt[-500:]},
-            index=0,
-        )
-    else:
-        return result
-    return replace(result, text="", tool_calls=[call], finish_reason="tool_calls")
-
-
 def prepare_conversation(payload: dict[str, Any], config: Config) -> Conversation:
-    """Map an OpenAI request payload into a Conversation (Task 9 mappings)."""
-    system_prompt, prompt = messages_to_prompt(payload.get("messages") or [])
-    warnings: list[str] = []
-
+    """Map a validated OpenAI request into the fixed subscription-only policy."""
+    system_prompt, prompt = messages_to_prompt(payload["messages"])
     effort = payload.get("reasoning_effort") or payload.get("effort")
     if isinstance(effort, dict):
         effort = effort.get("effort")
     if effort is not None:
         effort = str(effort).strip().lower()
         if effort not in _VALID_EFFORTS:
-            warnings.append(f"unknown reasoning effort '{effort}' ignored")
             effort = None
-    if payload.get("temperature") is not None:
-        warnings.append("temperature is best-effort; Claude Code may ignore it")
-    if payload.get("max_tokens") is not None:
-        warnings.append("max_tokens is best-effort; Claude Code may ignore it")
 
     requested_model = str(payload.get("model") or config.models[0])
+    try:
+        backend_model = MODEL_ID_ALIASES[requested_model]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported model '{requested_model}'. Allowed models: "
+            + ", ".join(config.models)
+        ) from exc
 
+    tools = payload.get("tools") or []
+    tool_choice = payload.get("tool_choice")
+    choice_kind, choice_name = normalize_tool_choice(tool_choice)
+    available_names = {_tool_name_of(tool) for tool in tools}
+    if choice_kind == "function" and choice_name not in available_names:
+        raise ValueError(f"tool_choice names unavailable tool: {choice_name}")
+    if choice_kind == "required" and not tools:
+        raise ValueError("tool_choice='required' needs at least one tool")
     return Conversation(
         model=requested_model,
-        # Verbatim pass-through; MODEL_ID_ALIASES only maps legacy display
-        # names from configs saved before the picker switched to native
-        # selector names.
-        backend_model=MODEL_ID_ALIASES.get(requested_model, requested_model),
+        backend_model=backend_model,
         system_prompt=system_prompt,
         prompt=prompt,
-        tools=payload.get("tools") or [],
-        tool_choice=payload.get("tool_choice"),
-        temperature=payload.get("temperature"),
-        max_tokens=payload.get("max_tokens"),
+        tools=tools,
+        tool_choice=tool_choice,
         effort=effort,
-        cwd=payload.get("cwd") or config.cwd,
-        resume=(payload.get("extra_body") or {}).get("resume")
-        if isinstance(payload.get("extra_body"), dict)
-        else None,
-        mode=config.mode,
-        warnings=warnings,
     )
 
 
@@ -650,10 +544,6 @@ def reset_sdk_available_cache() -> None:
     _SDK_AVAILABLE = None
 
 
-def cli_path() -> str | None:
-    return shutil.which("claude")
-
-
 # Brand-neutral on purpose: this text (and the `host-tools` server name) goes
 # into the model context on every request. Naming the host application here
 # adds nothing for the model — the protocol is the same for any host.
@@ -673,175 +563,122 @@ Respond to the user directly with a normal text answer.
 """.strip()
 
 
-# Env vars that reroute Claude Code's auth/endpoint away from the
-# `claude login` subscription. Verified live: an inherited ANTHROPIC_API_KEY
-# silently pushed every request onto extra-usage billing, while the same
-# request with the key stripped was served from the plan. CLAUDE_CODE_OAUTH_TOKEN
-# is deliberately NOT in this list — it IS the subscription credential.
-_API_BILLING_ENV_VARS = (
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_BASE_URL",
-)
-
 # Single-argv safety margin: Linux caps one exec argument at ~128KiB
 # (MAX_ARG_STRLEN); stay well below and switch to --append-system-prompt-file.
 _MAX_INLINE_SYSTEM_PROMPT_BYTES = 60_000
 
 
 class ClaudeBridge:
-    """Drives Claude Code via the SDK, falling back to the ``claude`` CLI."""
+    """Drive Claude Code through the mandatory Agent SDK under a fixed policy."""
 
     def __init__(self, config: Config | None = None) -> None:
         self.config = config or get_config()
 
     def _isolated_workdir(self) -> str:
-        """Empty directory the backend runs in when no cwd was requested."""
         workdir = self.config.backend_workdir
-        try:
-            workdir.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            return str(workdir)
+        workdir.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            os.chmod(workdir, 0o700)
         return str(workdir)
 
-    def _system_append_file(self, text: str) -> str:
-        """Write an oversized system-prompt append to disk; return its path.
-
-        The SDK/CLI pass ``--append-system-prompt`` as a single process
-        argument, and Linux caps one argv entry at ~128KiB (MAX_ARG_STRLEN) —
-        a full Hermes system prompt (memory + skills) exceeds that and the
-        exec fails with ``[Errno 7] Argument list too long`` (reproduced by
-        the diagnose matrix at the 50k-token case). ``--append-system-prompt-
-        file`` reads the same text from a file with no size cap.
-        """
-        import time as _time
-        import uuid as _uuid
+    def _system_append_file(self, text: str) -> Path:
+        """Create a private temporary system-prompt file for argv-size safety."""
+        import uuid
 
         directory = self.config.run_dir / "sysprompts"
         directory.mkdir(parents=True, exist_ok=True)
-        # Opportunistic GC: requests are short-lived; anything older than
-        # 10 minutes is finished and safe to drop.
-        cutoff = _time.time() - 600
-        for old in directory.glob("append-*.txt"):
-            try:
-                if old.stat().st_mtime < cutoff:
-                    old.unlink()
-            except OSError:
-                pass
-        path = directory / f"append-{_uuid.uuid4().hex}.txt"
-        path.write_text(text, encoding="utf-8")
-        return str(path)
+        if os.name != "nt":
+            os.chmod(directory, 0o700)
+        path = directory / f"append-{uuid.uuid4().hex}.txt"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return path
 
-    # -- auth env hygiene -------------------------------------------------- #
-    def _backend_env(self) -> dict[str, str] | None:
-        """Environment for the Claude Code backend, or None to inherit as-is.
-
-        With ``force_subscription`` on (the default), API-key/billing env
-        vars are removed so Claude Code always authenticates via the
-        ``claude login`` subscription (OAuth) instead of silently billing an
-        inherited key. ``HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION=0`` restores
-        plain inheritance.
-        """
-        if not self.config.force_subscription:
-            return None
-        env = dict(os.environ)
-        for var in _API_BILLING_ENV_VARS:
-            env.pop(var, None)
+    def _backend_env(self) -> dict[str, str]:
+        """Minimal environment needed by the bundled Claude Code process."""
+        allowed = {
+            "PATH",
+            "HOME",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "XDG_CONFIG_HOME",
+            "CLAUDE_CONFIG_DIR",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "TMPDIR",
+            "TMP",
+            "TEMP",
+            "SHELL",
+            "COMSPEC",
+            "SYSTEMROOT",
+            "WINDIR",
+            "PATHEXT",
+            "LANG",
+            "LANGUAGE",
+            "TERM",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        }
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key in allowed or key.startswith("LC_")
+        }
+        env.setdefault("PATH", os.defpath)
         return env
 
-    # -- public API -------------------------------------------------------- #
     async def complete(self, conv: Conversation) -> BridgeResult:
-        if sdk_available():
-            try:
-                return await self._complete_sdk(conv)
-            except ClaudeCodeAPIError:
-                # Upstream Claude Code/API failures are authoritative model
-                # errors, not transport failures. Do not retry through the CLI
-                # and risk hiding status/type or burning extra quota.
-                raise
-            except Exception as exc:  # pragma: no cover - exercised live
-                # Fall back to the CLI on SDK transport/runtime failure.
-                if cli_path():
-                    return await self._complete_cli(conv, note=str(exc))
-                raise
-        if cli_path():
-            return await self._complete_cli(conv)
-        raise RuntimeError(
-            "Neither claude-agent-sdk nor the 'claude' CLI is available. "
-            "Install one: pip install claude-agent-sdk OR npm i -g "
-            "@anthropic-ai/claude-code"
-        )
+        if not sdk_available():
+            raise RuntimeError(
+                "claude-agent-sdk is required; reinstall hermes-claude-code"
+            )
+        return await self._complete_sdk(conv)
 
     async def stream(self, conv: Conversation) -> AsyncIterator[dict[str, Any]]:
-        """Yield ``{'type': 'text'|'done', ...}`` events."""
-        if sdk_available():
-            try:
-                async for evt in self._stream_sdk(conv):
-                    yield evt
-                return
-            except ClaudeCodeAPIError:
-                # Preserve upstream API/quota/auth failures as errors instead
-                # of falling back to another Claude invocation.
-                raise
-            except Exception:  # pragma: no cover - exercised live
-                pass
-        # Fallback: produce the full result, then emit it as a single chunk.
-        result = await self.complete(conv)
-        if result.reasoning_content:
-            yield {"type": "reasoning", "text": result.reasoning_content}
-        if result.text:
-            yield {"type": "text", "text": result.text}
-        yield {
-            "type": "done",
-            "finish_reason": result.finish_reason,
-            "tool_calls": result.tool_calls,
-            "session_id": result.session_id,
-            "usage": result.usage,
-        }
+        if not sdk_available():
+            raise RuntimeError(
+                "claude-agent-sdk is required; reinstall hermes-claude-code"
+            )
+        async for event in self._stream_sdk(conv):
+            yield event
 
-    # -- SDK backend ------------------------------------------------------- #
     def _build_options(self, conv: Conversation):
         from claude_agent_sdk import ClaudeAgentOptions
 
-        kwargs: dict[str, Any] = {"model": conv.backend_model}
-        backend_env = self._backend_env()
-        if backend_env is not None:
-            kwargs["env"] = backend_env
-        # SUBSCRIPTION-CRITICAL: keep Claude Code's own system prompt (the
-        # ``claude_code`` preset) and APPEND Hermes' prompt to it, never
-        # replace it. Replacing the system prompt outright makes Anthropic's
-        # server classify the request as third-party/SDK traffic, which bills
-        # against "extra usage" credits instead of the Pro/Max/Team
-        # subscription allowance — observed live as
-        # ``API Error: 400 You're out of extra usage``. This mirrors what the
-        # CLI fallback already does with ``--append-system-prompt``.
-        system_appends: list[str] = []
-        if conv.system_prompt:
-            system_appends.append(conv.system_prompt)
-        # Always pin a working directory. Without an explicit cwd the backend
-        # would inherit the proxy process's cwd and gather ITS git status /
-        # files into the system prompt — leaking host context into prompts
-        # and, live-confirmed by Anthropic as a harness-detection bug,
-        # flipping sessions to extra-usage billing when that context contains
-        # "hermes"-named git content. An empty isolated dir has no context to
-        # gather.
-        kwargs["cwd"] = conv.cwd or self._isolated_workdir()
+        kwargs: dict[str, Any] = {
+            "model": conv.backend_model,
+            "env": self._backend_env(),
+            "cwd": self._isolated_workdir(),
+            "tools": [],
+            "permission_mode": "dontAsk",
+            "setting_sources": [],
+            "include_partial_messages": True,
+        }
         if conv.effort:
             kwargs["effort"] = conv.effort
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
-        if conv.resume:
-            kwargs["resume"] = conv.resume
 
+        system_appends: list[str] = []
+        if conv.system_prompt:
+            system_appends.append(conv.system_prompt)
         server, allowed, captured = mcp_server.build_sdk_mcp_server(
             effective_tools(conv)
         )
         if server is not None:
-            kwargs["tools"] = []
             kwargs["mcp_servers"] = {mcp_server.MCP_SERVER_NAME: server}
             kwargs["strict_mcp_config"] = True
-            kwargs["permission_mode"] = "dontAsk"
-            if conv.mode == "strict":
-                kwargs["max_turns"] = 1
+            kwargs["max_turns"] = 1
             kwargs["allowed_tools"] = allowed
             system_appends.append(_HOST_TOOL_SYSTEM_PROMPT)
             kind, name = normalize_tool_choice(conv.tool_choice)
@@ -849,53 +686,34 @@ class ClaudeBridge:
             if directive:
                 system_appends.append(directive)
         else:
-            # No Hermes tools to expose — either none were requested, or
-            # tool_choice="none" suppressed them. Explicitly disable Claude
-            # Code's own native tools too (Bash/Edit/WebFetch/...) so a
-            # tool-less request behaves like a plain text-in/text-out
-            # chat-completions call, with no side effects on the host running
-            # the proxy. Without this, ClaudeAgentOptions.tools keeps its
-            # SDK default (the full native toolset) with no permission_mode
-            # set — headless, that risks Claude Code hanging on a
-            # tool-approval prompt nobody can answer.
-            kwargs["tools"] = []
-            # The claude_code preset system prompt (kept for subscription
-            # billing) describes Claude Code's native tools at length, which
-            # nudges the model to attempt one (TodoWrite, Task, ...). With
-            # tools disabled that attempt ends the run in an error state.
-            # Steer it back to plain conversation.
+            kind, name = normalize_tool_choice(conv.tool_choice)
+            if kind in ("required", "function"):
+                raise ValueError(
+                    f"tool_choice requires unavailable tool: {name or 'any tool'}"
+                )
             system_appends.append(_NO_TOOLS_SYSTEM_PROMPT)
 
         preset: dict[str, Any] = {"type": "preset", "preset": "claude_code"}
+        temporary_paths: list[Path] = []
         if system_appends:
             append_text = "\n\n".join(system_appends)
             if len(append_text.encode("utf-8")) > _MAX_INLINE_SYSTEM_PROMPT_BYTES:
-                kwargs["extra_args"] = {
-                    **(kwargs.get("extra_args") or {}),
-                    "append-system-prompt-file": self._system_append_file(
-                        append_text
-                    ),
-                }
+                path = self._system_append_file(append_text)
+                temporary_paths.append(path)
+                kwargs["extra_args"] = {"append-system-prompt-file": str(path)}
             else:
                 preset["append"] = append_text
         kwargs["system_prompt"] = preset
-        return ClaudeAgentOptions(**kwargs), captured
+        return ClaudeAgentOptions(**kwargs), captured, temporary_paths
 
     async def _complete_sdk(self, conv: Conversation) -> BridgeResult:
-        """Non-streaming completion, implemented as a ``_stream_sdk`` consumer.
-
-        ``_stream_sdk`` already collects text/tool calls, applies every
-        post-pass (captured MCP calls, host-tool recovery, tool_choice), and
-        only emits text after those passes — so the non-streaming API is just
-        its consumer. One SDK code path to maintain instead of two copies.
-        """
         text_parts: list[str] = []
         done: dict[str, Any] = {}
-        async for evt in self._stream_sdk(conv):
-            if evt.get("type") == "text" and evt.get("text"):
-                text_parts.append(evt["text"])
-            elif evt.get("type") == "done":
-                done = evt
+        async for event in self._stream_sdk(conv):
+            if event.get("type") == "text" and event.get("text"):
+                text_parts.append(event["text"])
+            elif event.get("type") == "done":
+                done = event
         return BridgeResult(
             text="".join(text_parts),
             tool_calls=done.get("tool_calls") or [],
@@ -910,77 +728,124 @@ class ClaudeBridge:
         from claude_agent_sdk import (
             AssistantMessage,
             ResultMessage,
+            StreamEvent,
             TextBlock,
             ThinkingBlock,
             ToolUseBlock,
             query,
         )
 
-        options, captured = self._build_options(conv)
+        options, captured, temporary_paths = self._build_options(conv)
         tool_calls: list[dict[str, Any]] = []
         session_id: str | None = None
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
         result_text: str | None = None
         usage: dict[str, int] | None = None
+        partial_text_seen = False
+        partial_reasoning_seen = False
 
         try:
-            async for message in query(prompt=conv.prompt, options=options):
-                if isinstance(message, AssistantMessage):
-                    exc = _assistant_error_to_exception(message)
-                    if exc is not None:
-                        raise exc
-                    for block in message.content:
-                        if isinstance(block, TextBlock) and block.text:
-                            _raise_if_claude_api_error(block.text)
-                            text_parts.append(block.text)
-                        elif isinstance(block, ThinkingBlock) and block.thinking:
-                            reasoning_parts.append(block.thinking)
-                            yield {"type": "reasoning", "text": block.thinking}
-                        elif isinstance(block, ToolUseBlock):
-                            if not mcp_server.is_hermes_mcp_tool_name(block.name):
+            async with asyncio.timeout(self.config.request_timeout):
+                try:
+                    async for message in query(prompt=conv.prompt, options=options):
+                        if isinstance(message, StreamEvent):
+                            event = message.event or {}
+                            if event.get("type") != "content_block_delta":
                                 continue
-                            tool_calls.append(
-                                mcp_server.tool_use_to_openai(
-                                    name=mcp_server.strip_mcp_prefix(block.name),
-                                    arguments=block.input,
-                                    index=len(tool_calls),
-                                    call_id=block.id,
-                                )
+                            delta = event.get("delta") or {}
+                            dtype = delta.get("type")
+                            value = delta.get("text") if dtype == "text_delta" else None
+                            if value:
+                                partial_text_seen = True
+                                text_parts.append(str(value))
+                                yield {"type": "text", "text": str(value)}
+                            thinking = (
+                                delta.get("thinking")
+                                if dtype == "thinking_delta"
+                                else None
                             )
-                elif isinstance(message, ResultMessage):
-                    session_id = message.session_id
-                    result_text = message.result
-                    usage = usage_to_openai(getattr(message, "usage", None))
-                    if message.is_error:
-                        # See _complete_sdk: deliver already-streamed content
-                        # rather than turning a good answer into an error.
-                        if text_parts or reasoning_parts or tool_calls:
-                            logger.info(
-                                "tolerating errored ResultMessage with content: %s",
-                                _result_error_detail(message),
-                            )
-                        else:
-                            raise ClaudeCodeAPIError(
-                                _result_error_detail(message),
-                                message.api_error_status,
-                            )
-        except Exception as exc:
-            if "maximum number of turns" not in str(exc).lower() or not (captured or tool_calls):
-                raise
+                            if thinking:
+                                partial_reasoning_seen = True
+                                reasoning_parts.append(str(thinking))
+                                yield {"type": "reasoning", "text": str(thinking)}
+                        elif isinstance(message, AssistantMessage):
+                            exc = _assistant_error_to_exception(message)
+                            if exc is not None:
+                                raise exc
+                            for block in message.content:
+                                if isinstance(block, TextBlock) and block.text:
+                                    _raise_if_claude_api_error(block.text)
+                                    if not partial_text_seen:
+                                        text_parts.append(block.text)
+                                elif (
+                                    isinstance(block, ThinkingBlock) and block.thinking
+                                ):
+                                    if not partial_reasoning_seen:
+                                        reasoning_parts.append(block.thinking)
+                                        yield {
+                                            "type": "reasoning",
+                                            "text": block.thinking,
+                                        }
+                                elif isinstance(
+                                    block, ToolUseBlock
+                                ) and mcp_server.is_hermes_mcp_tool_name(block.name):
+                                    tool_calls.append(
+                                        mcp_server.tool_use_to_openai(
+                                            name=mcp_server.strip_mcp_prefix(
+                                                block.name
+                                            ),
+                                            arguments=block.input,
+                                            index=len(tool_calls),
+                                            call_id=block.id,
+                                        )
+                                    )
+                        elif isinstance(message, ResultMessage):
+                            session_id = message.session_id
+                            result_text = message.result
+                            usage = usage_to_openai(getattr(message, "usage", None))
+                            if message.is_error:
+                                if text_parts or tool_calls:
+                                    logger.info(
+                                        "tolerating errored ResultMessage with usable content"
+                                    )
+                                else:
+                                    raise ClaudeCodeAPIError(
+                                        _result_error_detail(message),
+                                        message.api_error_status,
+                                    )
+                except Exception as exc:
+                    if "maximum number of turns" not in str(exc).lower() or not (
+                        captured or tool_calls
+                    ):
+                        raise
+        finally:
+            for path in temporary_paths:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
 
         result = BridgeResult(
             text="".join(text_parts) or (result_text or ""),
-            tool_calls=tool_calls if conv.mode == "strict" else [],
-            finish_reason="tool_calls" if (tool_calls and conv.mode == "strict") else "stop",
+            tool_calls=tool_calls,
+            finish_reason="tool_calls" if tool_calls else "stop",
             session_id=session_id,
             backend="sdk",
             reasoning_content="".join(reasoning_parts),
             usage=usage,
-        ).with_captured_tool_calls(captured, mode=conv.mode)
-        result = _recover_host_tool_call(conv, result)
+        ).with_captured_tool_calls(captured)
         result = apply_tool_choice(conv, result)
-        if result.finish_reason != "tool_calls" and result.text:
+        choice_kind, _ = normalize_tool_choice(conv.tool_choice)
+        if choice_kind in ("required", "function") and not result.tool_calls:
+            raise ClaudeCodeAPIError(
+                "Claude Code did not produce the required tool call", 502
+            )
+        if (
+            not partial_text_seen
+            and result.finish_reason != "tool_calls"
+            and result.text
+        ):
             _raise_if_claude_api_error(result.text)
             yield {"type": "text", "text": result.text}
         yield {
@@ -991,70 +856,3 @@ class ClaudeBridge:
             "reasoning_content": result.reasoning_content,
             "usage": result.usage,
         }
-
-    # -- CLI backend ------------------------------------------------------- #
-    async def _complete_cli(
-        self, conv: Conversation, note: str | None = None
-    ) -> BridgeResult:
-        claude = cli_path()
-        if not claude:
-            raise RuntimeError("'claude' CLI not found on PATH")
-
-        if not isinstance(conv.prompt, str):
-            raise RuntimeError(
-                "claude CLI fallback does not support image content; install/fix claude-agent-sdk"
-            )
-
-        cmd = [claude, "-p", "--output-format", "json", "--model", conv.backend_model]
-        if conv.system_prompt:
-            # Same argv-size guard as the SDK path (Linux MAX_ARG_STRLEN).
-            if len(conv.system_prompt.encode("utf-8")) > _MAX_INLINE_SYSTEM_PROMPT_BYTES:
-                cmd += [
-                    "--append-system-prompt-file",
-                    self._system_append_file(conv.system_prompt),
-                ]
-            else:
-                cmd += ["--append-system-prompt", conv.system_prompt]
-        if conv.cwd:
-            cmd += ["--add-dir", conv.cwd]
-        if conv.resume:
-            cmd += ["--resume", conv.resume]
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            # Same isolation as the SDK path: never inherit the proxy's cwd.
-            cwd=conv.cwd or self._isolated_workdir(),
-            env=self._backend_env(),
-        )
-        out, err = await proc.communicate(conv.prompt.encode("utf-8"))
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"claude CLI exited {proc.returncode}: {err.decode('utf-8', 'replace')}"
-            )
-
-        text = out.decode("utf-8", "replace").strip()
-        session_id = None
-        usage: dict[str, int] | None = None
-        try:
-            data = json.loads(text)
-            if isinstance(data, dict):
-                if data.get("is_error") or data.get("api_error_status"):
-                    message = str(data.get("result") or text)
-                    _raise_if_claude_api_error(message, data.get("api_error_status"))
-                    raise ClaudeCodeAPIError(message, data.get("api_error_status"))
-                text = data.get("result", text)
-                session_id = data.get("session_id")
-                usage = usage_to_openai(data.get("usage"))
-        except json.JSONDecodeError:
-            pass
-        _raise_if_claude_api_error(text)
-        return BridgeResult(
-            text=text,
-            finish_reason="stop",
-            session_id=session_id,
-            backend="cli",
-            usage=usage,
-        )

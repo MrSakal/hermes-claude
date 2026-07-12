@@ -238,116 +238,39 @@ def test_unknown_assistant_error_with_text_is_not_fatal_stream(monkeypatch):
     assert events[-1]["finish_reason"] == "stop"
 
 
-# --------------------------------------------------------------------------- #
-# ClaudeBridge.stream() fallback — reasoning_content preserved
-# --------------------------------------------------------------------------- #
-def test_stream_fallback_yields_reasoning_before_text(monkeypatch):
-    """When _stream_sdk fails and complete() fallback runs, reasoning is emitted."""
-    from hermes_claude_code.bridge import BridgeResult
-
-    monkeypatch.setattr(
-        claude_agent_sdk,
-        "query",
-        None,  # ensure SDK path is never called
-    )
-
-    # Patch the single-attempt completion the stream fallback consumes.
-    async def fake_complete(self, conv):
-        return BridgeResult(
-            text="final answer",
-            reasoning_content="some reasoning",
-            finish_reason="stop",
-        )
-
-    monkeypatch.setattr(ClaudeBridge, "complete", fake_complete)
-
-    # Force the SDK path to fail so the fallback triggers.
-    # We do this by making sdk_available() return True but _stream_sdk raise.
+def test_public_stream_does_not_retry_sdk_failure(monkeypatch):
     import hermes_claude_code.bridge as bridge_mod
 
     monkeypatch.setattr(bridge_mod, "sdk_available", lambda: True)
 
     async def boom_stream(self, conv):
         raise RuntimeError("sdk exploded")
-        yield  # make it a generator
+        yield
 
     monkeypatch.setattr(ClaudeBridge, "_stream_sdk", boom_stream)
 
     async def run():
-        events = []
-        async for evt in ClaudeBridge(Config()).stream(_conv()):
-            events.append(evt)
-        return events
+        async for _ in ClaudeBridge(Config()).stream(_conv()):
+            pass
 
-    events = asyncio.run(run())
-
-    types = [e["type"] for e in events]
-    assert "reasoning" in types
-    assert "text" in types
-    assert "done" in types
-    # reasoning must appear before text
-    assert types.index("reasoning") < types.index("text")
-    assert events[types.index("reasoning")]["text"] == "some reasoning"
-    assert events[types.index("text")]["text"] == "final answer"
+    with pytest.raises(RuntimeError, match="sdk exploded"):
+        asyncio.run(run())
 
 
-# --------------------------------------------------------------------------- #
-# Public bridge methods must not retry authoritative API errors via CLI fallback
-# --------------------------------------------------------------------------- #
-def test_complete_preserves_sdk_api_error_without_cli_fallback(monkeypatch):
+def test_public_complete_does_not_retry_api_error(monkeypatch):
     import hermes_claude_code.bridge as bridge_mod
 
     monkeypatch.setattr(bridge_mod, "sdk_available", lambda: True)
-    monkeypatch.setattr(bridge_mod, "cli_path", lambda: "/usr/bin/claude")
 
     async def boom(self, conv):
         raise ClaudeCodeAPIError("quota exhausted", 400)
 
-    async def forbidden_cli(self, conv, note=None):
-        raise AssertionError("CLI fallback must not run for API errors")
-
     monkeypatch.setattr(ClaudeBridge, "_complete_sdk", boom)
-    monkeypatch.setattr(ClaudeBridge, "_complete_cli", forbidden_cli)
-
-    async def run():
-        return await ClaudeBridge(Config()).complete(_conv())
-
     with pytest.raises(ClaudeCodeAPIError) as exc_info:
-        asyncio.run(run())
-
+        asyncio.run(ClaudeBridge(Config()).complete(_conv()))
     assert exc_info.value.status_code == 400
 
 
-def test_stream_preserves_sdk_api_error_without_complete_fallback(monkeypatch):
-    import hermes_claude_code.bridge as bridge_mod
-
-    monkeypatch.setattr(bridge_mod, "sdk_available", lambda: True)
-
-    async def boom_stream(self, conv):
-        raise ClaudeCodeAPIError("auth failed", 401)
-        yield  # make this an async generator
-
-    async def forbidden_complete(self, conv):
-        raise AssertionError("complete fallback must not run for API errors")
-
-    monkeypatch.setattr(ClaudeBridge, "_stream_sdk", boom_stream)
-    monkeypatch.setattr(ClaudeBridge, "complete", forbidden_complete)
-
-    async def run():
-        events = []
-        async for evt in ClaudeBridge(Config()).stream(_conv()):
-            events.append(evt)
-        return events
-
-    with pytest.raises(ClaudeCodeAPIError) as exc_info:
-        asyncio.run(run())
-
-    assert exc_info.value.status_code == 401
-
-
-# --------------------------------------------------------------------------- #
-# Graceful partial + rich error detail (v0.3.1)
-# --------------------------------------------------------------------------- #
 def test_errored_result_with_text_is_tolerated(monkeypatch):
     # The claude_code preset sometimes ends a good answer in an error state
     # (e.g. a stray tool attempt). If the model produced text, deliver it.
@@ -393,5 +316,5 @@ def test_no_tools_path_steers_model_away_from_tools():
     conv = prepare_conversation(
         {"messages": [{"role": "user", "content": "hi"}]}, Config()
     )
-    options, _ = ClaudeBridge(Config())._build_options(conv)
+    options, _, _ = ClaudeBridge(Config())._build_options(conv)
     assert "No tools are available" in options.system_prompt["append"]

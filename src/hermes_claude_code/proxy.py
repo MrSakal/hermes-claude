@@ -1,26 +1,21 @@
-"""Local OpenAI-compatible proxy for Claude Code.
-
-Exposes ``/health``, ``/v1/models`` and ``/v1/chat/completions`` (streaming and
-non-streaming) on localhost. Hermes points its ``hermes-claude-code`` provider
-at this proxy; the proxy translates requests into Claude Code calls via the
-bridge.
-
-Also contains the proxy lifecycle manager (start/stop/status/health) used by
-the plugin's session hook and CLI commands, plus the ``python -m
-hermes_claude_code.proxy`` entrypoint.
-"""
+"""Authenticated localhost OpenAI-compatible proxy and lifecycle manager."""
 
 from __future__ import annotations
 
 import argparse
+import asyncio
+import hmac
 import json
 import logging
+import logging.handlers
 import os
 import signal
+import subprocess
 import sys
 import time
 import uuid
-from typing import Any
+from pathlib import Path
+from typing import Any, AsyncIterator
 
 import httpx
 from fastapi import FastAPI, Request
@@ -30,32 +25,25 @@ from . import __version__
 from .bridge import (
     ClaudeBridge,
     ClaudeCodeAPIError,
-    preemptive_host_tool_call,
     prepare_conversation,
     sdk_available,
 )
 from .config import Config, MODEL_OWNER, get_config
 
-
 logger = logging.getLogger("hermes_claude_code.proxy")
+_ZERO_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 
 def _setup_logging(cfg: Config) -> None:
-    """Write plugin diagnostics to ~/.hermes/logs/hermes-claude-code.log.
-
-    Configured on the package logger so records from every module (proxy,
-    bridge self-healing, ...) land in the same file.
-    """
     package_logger = logging.getLogger("hermes_claude_code")
-    # Idempotency guard: only OUR FileHandler counts. Checking for any
-    # handler at all silently disabled file logging whenever a host attached
-    # its own handler to this logger (seen live: pytest's log-capture
-    # handlers land here because propagate=False below takes this logger out
-    # of root capture).
     if any(isinstance(h, logging.FileHandler) for h in package_logger.handlers):
         return
     cfg.log_file.parent.mkdir(parents=True, exist_ok=True)
-    handler = logging.FileHandler(cfg.log_file, encoding="utf-8")
+    handler = logging.handlers.RotatingFileHandler(
+        cfg.log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    if os.name != "nt":
+        os.chmod(cfg.log_file, 0o600)
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     )
@@ -64,70 +52,24 @@ def _setup_logging(cfg: Config) -> None:
     package_logger.propagate = False
 
 
-def _tool_names(payload: dict[str, Any]) -> list[str]:
-    names: list[str] = []
-    for tool in payload.get("tools") or []:
-        if not isinstance(tool, dict):
-            continue
-        fn = tool.get("function") if tool.get("type") == "function" else None
-        if isinstance(fn, dict) and fn.get("name"):
-            names.append(str(fn["name"]))
-    return names
-
-
-def _log_host_tool_calls(origin: str, tool_calls: list[dict[str, Any]]) -> None:
-    """Log every Hermes-bound tool call the plugin emits.
-
-    The plugin cannot write TUI/Desktop UI events directly without patching
-    Hermes core.  The native path is to emit OpenAI-compatible ``tool_calls``;
-    Hermes then executes and renders them.  This log gives a plugin-owned audit
-    trail in ``~/.hermes/logs/hermes-claude-code.log`` for the same calls.
-    """
-    for index, call in enumerate(tool_calls or []):
-        fn = call.get("function", {}) if isinstance(call, dict) else {}
-        logger.info(
-            "host tool_call origin=%s index=%d id=%s name=%s arguments=%s",
-            origin,
-            index,
-            call.get("id") if isinstance(call, dict) else "",
-            fn.get("name"),
-            fn.get("arguments"),
-        )
-
-
-# --------------------------------------------------------------------------- #
-# OpenAI response shaping
-# --------------------------------------------------------------------------- #
 def _now() -> int:
     return int(time.time())
 
 
 def models_payload(config: Config) -> dict[str, Any]:
-    # ``context_length`` is read by Hermes (agent/model_metadata.py extracts
-    # it from provider /v1/models listings) and drives its context
-    # compression. Advertising the subscription-safe 200k boundary is
-    # SUBSCRIPTION-CRITICAL: Claude Code silently switches requests larger
-    # than ~200k tokens into 1M-context mode, which since Claude Code v2.1.51
-    # bills as EXTRA USAGE regardless of plan (anthropics/claude-code#28927).
-    # Verified live: identical Hermes setups worked under the boundary
-    # (in≈95k) and failed with "out of extra usage" once the full
-    # toolset/MCP schemas pushed the prompt past it.
     return {
         "object": "list",
         "data": [
             {
-                "id": m,
+                "id": model,
                 "object": "model",
                 "created": _now(),
                 "owned_by": MODEL_OWNER,
                 "context_length": config.context_length,
             }
-            for m in config.models
+            for model in config.models
         ],
     }
-
-
-_ZERO_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 
 def completion_response(
@@ -149,37 +91,26 @@ def completion_response(
         "object": "chat.completion",
         "created": _now(),
         "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "message": message,
-                "finish_reason": finish_reason,
-            }
-        ],
-        # Real token counts from the Claude Code backend when reported;
-        # zeros otherwise (e.g. preemptive host tool calls that never hit
-        # the model) so Hermes' cost accounting is never fed garbage.
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
         "usage": dict(usage) if usage else dict(_ZERO_USAGE),
     }
 
 
 def _chunk(
     model: str,
-    cmpl_id: str,
+    completion_id: str,
     delta: dict[str, Any],
     finish: Any = None,
     usage: dict[str, int] | None = None,
 ) -> str:
-    payload = {
-        "id": cmpl_id,
+    payload: dict[str, Any] = {
+        "id": completion_id,
         "object": "chat.completion.chunk",
         "created": _now(),
         "model": model,
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
     }
     if usage:
-        # OpenAI puts usage on the terminal chunk; extra field is ignored by
-        # clients that don't read it.
         payload["usage"] = dict(usage)
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -188,15 +119,129 @@ def error_payload(message: str, type_: str = "invalid_request_error", code: Any 
     return {"error": {"message": message, "type": type_, "code": code}}
 
 
-# --------------------------------------------------------------------------- #
-# FastAPI app
-# --------------------------------------------------------------------------- #
+def _bearer_token(request: Request) -> str:
+    value = request.headers.get("authorization", "")
+    return value[7:].strip() if value.lower().startswith("bearer ") else ""
+
+
+def _authorized(request: Request, cfg: Config) -> bool:
+    return hmac.compare_digest(_bearer_token(request), cfg.api_key)
+
+
+async def _read_json_limited(request: Request, limit: int) -> Any:
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > limit:
+            raise OverflowError(f"request body exceeds {limit} bytes")
+    try:
+        return json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid JSON body") from exc
+
+
+def _validate_payload(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return "request body must be an object"
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return "'messages' must be a non-empty array"
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            return f"messages[{index}] must be an object"
+        if message.get("role") not in {
+            "system",
+            "developer",
+            "user",
+            "assistant",
+            "tool",
+        }:
+            return f"messages[{index}].role is invalid"
+        content = message.get("content")
+        if content is not None and not isinstance(content, (str, list)):
+            return f"messages[{index}].content must be text or an array"
+        if isinstance(content, list):
+            for block_index, block in enumerate(content):
+                if not isinstance(block, (str, dict)):
+                    return f"messages[{index}].content[{block_index}] is invalid"
+                if isinstance(block, dict):
+                    block_type = block.get("type")
+                    if block_type not in {
+                        None,
+                        "text",
+                        "input_text",
+                        "image_url",
+                        "input_image",
+                    }:
+                        return (
+                            f"messages[{index}].content[{block_index}].type is invalid"
+                        )
+        tool_calls = message.get("tool_calls")
+        if tool_calls is not None and not isinstance(tool_calls, list):
+            return f"messages[{index}].tool_calls must be an array"
+    tools = payload.get("tools", [])
+    if not isinstance(tools, list):
+        return "'tools' must be an array"
+    for index, tool in enumerate(tools):
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            return f"tools[{index}] must be a function object"
+        fn = tool.get("function")
+        if not isinstance(fn, dict) or not isinstance(fn.get("name"), str):
+            return f"tools[{index}].function.name is required"
+        params = fn.get("parameters", {"type": "object"})
+        if not isinstance(params, dict):
+            return f"tools[{index}].function.parameters must be an object"
+    if "cwd" in payload:
+        return "request-level cwd is not supported"
+    extra = payload.get("extra_body")
+    if isinstance(extra, dict) and "resume" in extra:
+        return "request-level session resume is not supported"
+    return None
+
+
+def _estimate_input_tokens(value: Any) -> int:
+    """Conservative estimate that excludes base64 image bytes from text tokens."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return 1
+    if isinstance(value, str):
+        if value.startswith("data:image/") and ";base64," in value:
+            return 2_000
+        ascii_count = sum(ord(char) < 128 for char in value)
+        non_ascii = len(value) - ascii_count
+        return (ascii_count + 3) // 4 + non_ascii * 2
+    if isinstance(value, list):
+        return sum(_estimate_input_tokens(item) for item in value) + len(value)
+    if isinstance(value, dict):
+        return sum(
+            _estimate_input_tokens(key) + _estimate_input_tokens(item)
+            for key, item in value.items()
+        ) + len(value)
+    return _estimate_input_tokens(str(value))
+
+
+def _stream_tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"index": index, **call} for index, call in enumerate(calls)]
+
+
+def _log_tool_calls(origin: str, calls: list[dict[str, Any]]) -> None:
+    names = [
+        str((call.get("function") or {}).get("name") or "unknown") for call in calls
+    ]
+    logger.info("host tool_calls origin=%s names=%s", origin, ",".join(names))
+
+
 def create_app(bridge: Any | None = None, config: Config | None = None):
     cfg = config or get_config()
     _setup_logging(cfg)
-    bridge = bridge or ClaudeBridge(cfg)
-
-    app = FastAPI(title="Hermes Claude Code Proxy", version=__version__)
+    backend = bridge or ClaudeBridge(cfg)
+    semaphore = asyncio.Semaphore(cfg.max_concurrent_requests)
+    app = FastAPI(
+        title="Hermes Claude Code Proxy",
+        version=__version__,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -204,189 +249,157 @@ def create_app(bridge: Any | None = None, config: Config | None = None):
             "status": "ok",
             "version": __version__,
             "sdk_available": sdk_available(),
+            "profile": cfg.profile,
+            "instance": os.environ.get("HERMES_CLAUDE_CODE_INSTANCE_ID", ""),
         }
 
     @app.get("/v1/models")
-    async def list_models() -> dict[str, Any]:
+    async def list_models(request: Request):
+        if not _authorized(request, cfg):
+            return JSONResponse(
+                status_code=401,
+                content=error_payload("unauthorized", "authentication_error"),
+            )
         return models_payload(cfg)
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
-        try:
-            payload = await request.json()
-        except Exception:
+        if not _authorized(request, cfg):
             return JSONResponse(
-                status_code=400, content=error_payload("invalid JSON body")
+                status_code=401,
+                content=error_payload("unauthorized", "authentication_error"),
             )
-        if not isinstance(payload, dict) or not payload.get("messages"):
+        try:
+            payload = await _read_json_limited(request, cfg.max_request_bytes)
+        except OverflowError as exc:
+            return JSONResponse(
+                status_code=413,
+                content=error_payload(str(exc), code="request_too_large"),
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content=error_payload(str(exc)))
+        validation_error = _validate_payload(payload)
+        if validation_error:
+            return JSONResponse(
+                status_code=400, content=error_payload(validation_error)
+            )
+        try:
+            conversation = prepare_conversation(payload, cfg)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content=error_payload(str(exc)))
+
+        estimated_tokens = _estimate_input_tokens(payload)
+        safe_input_limit = int(cfg.context_length * 0.90)
+        if estimated_tokens > safe_input_limit:
             return JSONResponse(
                 status_code=400,
-                content=error_payload("'messages' is required"),
+                content=error_payload(
+                    f"Estimated input size {estimated_tokens} exceeds the "
+                    f"subscription-safe {safe_input_limit}-token input budget.",
+                    code="context_length_exceeded",
+                ),
             )
-
-        conv = prepare_conversation(payload, cfg)
         stream = bool(payload.get("stream"))
-        names = _tool_names(payload)
-        # ~4 chars/token: coarse but plenty to spot requests near the 200k
-        # subscription boundary (above it Claude Code flips to 1M-context
-        # mode, billed as extra usage — see models_payload).
-        approx_tokens = len(json.dumps(payload, ensure_ascii=False)) // 4
         logger.info(
-            "chat.completions request model=%s stream=%s messages=%d tools=%d "
-            "approx_tokens=%d tool_names=%s mode=%s",
-            conv.model,
+            "chat request model=%s stream=%s messages=%d tools=%d estimated_tokens=%d",
+            conversation.model,
             stream,
-            len(payload.get("messages") or []),
-            len(names),
-            approx_tokens,
-            ",".join(names[:30]),
-            conv.mode,
+            len(payload["messages"]),
+            len(payload.get("tools") or []),
+            estimated_tokens,
         )
-        if approx_tokens > cfg.context_length:
-            if cfg.enforce_context_limit:
-                # Fail-closed subscription guard: forwarding this request
-                # would flip Claude Code into 1M-context mode, which bills as
-                # EXTRA USAGE on every plan (claude-code#28927). An error the
-                # user sees beats a bill the user never approved. The ~4
-                # chars/token estimate over-counts JSON, so this triggers
-                # early rather than late — the safe direction.
-                logger.warning(
-                    "rejecting request: ~%d tokens exceeds context_length=%d "
-                    "(fail-closed; set HERMES_CLAUDE_CODE_ENFORCE_CONTEXT_LIMIT=0 "
-                    "to forward anyway)",
-                    approx_tokens,
-                    cfg.context_length,
-                )
-                return JSONResponse(
-                    status_code=400,
-                    content=error_payload(
-                        f"Request of ~{approx_tokens} tokens exceeds the "
-                        f"{cfg.context_length}-token subscription-safe boundary. "
-                        "Above it Claude Code switches to 1M-context mode, which "
-                        "bills as extra usage on every plan, so the proxy refuses "
-                        "rather than risk a surprise bill. Reduce the context "
-                        "(Hermes compresses to the advertised context window), or "
-                        "opt out with HERMES_CLAUDE_CODE_ENFORCE_CONTEXT_LIMIT=0 / "
-                        "raise HERMES_CLAUDE_CODE_CONTEXT_LENGTH deliberately.",
-                        code="context_length_exceeded",
-                    ),
-                )
-            logger.warning(
-                "request ~%d tokens exceeds advertised context_length=%d — "
-                "Claude Code will switch to 1M-context mode, which bills as "
-                "EXTRA USAGE; expect a 400 unless extra usage is enabled",
-                approx_tokens,
-                cfg.context_length,
-            )
-        preemptive = preemptive_host_tool_call(conv)
-        if preemptive is not None:
-            logger.info(
-                "preemptive host tool_call finish=%s tool_calls=%d",
-                preemptive.finish_reason,
-                len(preemptive.tool_calls),
-            )
-            _log_host_tool_calls("preemptive", preemptive.tool_calls)
-            if stream:
-                cmpl_id = f"chatcmpl-{uuid.uuid4().hex}"
-
-                async def preemptive_stream():
-                    yield _chunk(conv.model, cmpl_id, {"role": "assistant"})
-                    yield _chunk(conv.model, cmpl_id, {"tool_calls": preemptive.tool_calls})
-                    yield _chunk(conv.model, cmpl_id, {}, finish=preemptive.finish_reason)
-                    yield "data: [DONE]\n\n"
-
-                return StreamingResponse(
-                    preemptive_stream(), media_type="text/event-stream"
-                )
-            return completion_response(
-                model=conv.model,
-                text=preemptive.text,
-                finish_reason=preemptive.finish_reason,
-                tool_calls=preemptive.tool_calls,
-                reasoning_content=preemptive.reasoning_content,
-            )
 
         if stream:
-            cmpl_id = f"chatcmpl-{uuid.uuid4().hex}"
+            completion_id = f"chatcmpl-{uuid.uuid4().hex}"
 
-            async def event_stream():
-                yield _chunk(conv.model, cmpl_id, {"role": "assistant"})
+            async def event_stream() -> AsyncIterator[str]:
+                yield _chunk(conversation.model, completion_id, {"role": "assistant"})
                 finish = "stop"
                 tool_calls: list[dict[str, Any]] = []
                 usage: dict[str, int] | None = None
                 try:
-                    async for evt in bridge.stream(conv):
-                        if evt.get("type") == "text" and evt.get("text"):
-                            # DEBUG: this fires per delta — INFO here floods the
-                            # log file with one line per streamed fragment.
-                            logger.debug("stream text_delta chars=%d", len(evt["text"]))
-                            yield _chunk(
-                                conv.model, cmpl_id, {"content": evt["text"]}
-                            )
-                        elif evt.get("type") == "reasoning" and evt.get("text"):
-                            logger.debug("stream reasoning_delta chars=%d", len(evt["text"]))
-                            yield _chunk(
-                                conv.model, cmpl_id, {"reasoning_content": evt["text"]}
-                            )
-                        elif evt.get("type") == "done":
-                            finish = evt.get("finish_reason", "stop")
-                            tool_calls = evt.get("tool_calls") or []
-                            usage = evt.get("usage")
-                            logger.info(
-                                "stream done finish=%s tool_calls=%d usage=%s",
-                                finish,
-                                len(tool_calls),
-                                usage,
-                            )
-                except Exception as exc:  # pragma: no cover - live failure path
-                    logger.exception("stream failed: %s", exc)
-                    yield f"data: {json.dumps(error_payload(str(exc), 'server_error'))}\n\n"
+                    async with semaphore:
+                        async for event in backend.stream(conversation):
+                            kind = event.get("type")
+                            if kind == "text" and event.get("text"):
+                                yield _chunk(
+                                    conversation.model,
+                                    completion_id,
+                                    {"content": event["text"]},
+                                )
+                            elif kind == "reasoning" and event.get("text"):
+                                yield _chunk(
+                                    conversation.model,
+                                    completion_id,
+                                    {"reasoning_content": event["text"]},
+                                )
+                            elif kind == "done":
+                                finish = event.get("finish_reason", "stop")
+                                tool_calls = event.get("tool_calls") or []
+                                usage = event.get("usage")
+                except Exception as exc:
+                    request_id = uuid.uuid4().hex
+                    logger.error(
+                        "stream failed request_id=%s exception_type=%s",
+                        request_id,
+                        type(exc).__name__,
+                    )
+                    yield f"event: error\ndata: {json.dumps(error_payload('Claude Code request failed', 'server_error', request_id))}\n\n"
                     yield "data: [DONE]\n\n"
                     return
                 if tool_calls:
-                    _log_host_tool_calls("stream", tool_calls)
-                    yield _chunk(conv.model, cmpl_id, {"tool_calls": tool_calls})
-                yield _chunk(conv.model, cmpl_id, {}, finish=finish, usage=usage)
+                    _log_tool_calls("stream", tool_calls)
+                    yield _chunk(
+                        conversation.model,
+                        completion_id,
+                        {"tool_calls": _stream_tool_calls(tool_calls)},
+                    )
+                yield _chunk(
+                    conversation.model, completion_id, {}, finish=finish, usage=usage
+                )
                 yield "data: [DONE]\n\n"
 
-            return StreamingResponse(
-                event_stream(), media_type="text/event-stream"
-            )
+            return StreamingResponse(event_stream(), media_type="text/event-stream")
 
         try:
-            result = await bridge.complete(conv)
+            async with semaphore:
+                result = await backend.complete(conversation)
         except ClaudeCodeAPIError as exc:
-            # Preserve Claude Code's own status (400/401/402/429/...) instead
-            # of collapsing every failure to a generic 502 — Hermes' client
-            # retry/backoff and user-facing messaging both key off this, and
-            # a real auth/billing error shouldn't look like a transient
-            # gateway hiccup worth retrying 3x.
-            logger.exception(
-                "nonstream failed (claude code api error, status=%s): %s",
-                exc.status_code, exc,
+            request_id = uuid.uuid4().hex
+            logger.warning(
+                "Claude API error request_id=%s status=%s exception_type=%s",
+                request_id,
+                exc.status_code,
+                type(exc).__name__,
+            )
+            status = (
+                exc.status_code
+                if exc.status_code and 400 <= exc.status_code < 500
+                else 502
             )
             return JSONResponse(
-                status_code=exc.status_code or 502,
-                content=error_payload(str(exc), "server_error"),
+                status_code=status,
+                content=error_payload(
+                    "Claude Code request failed", "server_error", request_id
+                ),
             )
         except Exception as exc:
-            logger.exception("nonstream failed: %s", exc)
+            request_id = uuid.uuid4().hex
+            logger.error(
+                "request failed request_id=%s exception_type=%s",
+                request_id,
+                type(exc).__name__,
+            )
             return JSONResponse(
                 status_code=502,
-                content=error_payload(str(exc), "server_error"),
+                content=error_payload(
+                    "Claude Code request failed", "server_error", request_id
+                ),
             )
-        logger.info(
-            "nonstream done finish=%s tool_calls=%d reasoning_chars=%d text_chars=%d usage=%s",
-            result.finish_reason,
-            len(result.tool_calls),
-            len(result.reasoning_content or ""),
-            len(result.text or ""),
-            result.usage,
-        )
         if result.tool_calls:
-            _log_host_tool_calls("nonstream", result.tool_calls)
+            _log_tool_calls("nonstream", result.tool_calls)
         return completion_response(
-            model=conv.model,
+            model=conversation.model,
             text=result.text,
             finish_reason=result.finish_reason,
             tool_calls=result.tool_calls,
@@ -397,55 +410,60 @@ def create_app(bridge: Any | None = None, config: Config | None = None):
     return app
 
 
-# --------------------------------------------------------------------------- #
-# Lifecycle management
-# --------------------------------------------------------------------------- #
 def health_check(config: Config, timeout: float = 2.0) -> dict[str, Any] | None:
-    """Return the proxy /health body if reachable, else None."""
     try:
-        resp = httpx.get(config.health_url, timeout=timeout)
-        if resp.status_code == 200:
-            return resp.json()
+        response = httpx.get(config.health_url, timeout=timeout)
+        return response.json() if response.status_code == 200 else None
     except Exception:
         return None
-    return None
 
 
-def _read_pid(config: Config) -> int | None:
-    for path in (config.pid_file, config.legacy_pid_file):
-        try:
-            return int(path.read_text().strip())
-        except Exception:
-            continue
+def _safe_unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _private_atomic_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        if os.name != "nt":
+            os.chmod(path, 0o600)
+    finally:
+        _safe_unlink(temporary)
+
+
+def _read_pid_record(config: Config) -> dict[str, Any] | None:
+    try:
+        value = json.loads(config.pid_file.read_text(encoding="utf-8"))
+        if isinstance(value, dict) and isinstance(value.get("pid"), int):
+            return value
+    except (FileNotFoundError, ValueError, json.JSONDecodeError):
+        pass
     return None
 
 
 def _pid_alive(pid: int) -> bool:
-    """Return True when *pid* is a live process.
-
-    ``os.kill(pid, 0)`` is the POSIX idiom, but on Windows signal 0 is
-    CTRL_C_EVENT and the call fails with ``WinError 87`` (surfacing as
-    ``SystemError`` on some CPython builds) instead of probing liveness —
-    seen live: it broke ``stop``/``status`` for every real PID. Probe via
-    the Win32 API there instead.
-    """
     if sys.platform == "win32":
         import ctypes
 
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        STILL_ACTIVE = 259
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid)
-        )
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))
         if not handle:
             return False
         try:
             code = ctypes.c_ulong()
-            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
-            return bool(ok) and code.value == STILL_ACTIVE
+            ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            return bool(ok) and code.value == 259
         finally:
-            kernel32.CloseHandle(handle)
+            ctypes.windll.kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
         return True
@@ -453,176 +471,182 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def _proxy_version_current(health: dict[str, Any] | None) -> bool:
-    """Whether a healthy proxy is running THIS package version.
-
-    A proxy process keeps serving the code it was started with; after a
-    plugin upgrade the old process would silently keep running stale code
-    (observed live: fixes "not taking effect" until a manual stop/start).
-    Version mismatch → the caller should replace the process.
-    """
-    return bool(health) and str(health.get("version") or "") == __version__
-
-
 def _version_tuple(value: Any) -> tuple[int, ...]:
-    """Parse '0.3.1' → (0, 3, 1); unparseable/missing → (0,) (oldest)."""
     parts: list[int] = []
-    for piece in str(value or "").strip().split("."):
-        try:
-            parts.append(int(piece))
-        except ValueError:
+    for piece in str(value or "").split("."):
+        if not piece.isdigit():
             break
+        parts.append(int(piece))
     return tuple(parts) or (0,)
 
 
-def _proxy_outdated(health: dict[str, Any] | None) -> bool:
-    """True when a healthy proxy runs an OLDER version than this package.
+def _matching_health(health: dict[str, Any] | None, cfg: Config) -> bool:
+    return bool(health) and health.get("profile") == cfg.profile
 
-    Strictly older — a NEWER running proxy must be left alone. Verified live:
-    two Python environments on one machine, one still carrying an old plugin,
-    ping-ponged proxy replacements ("replacing stale proxy (running=0.3.1,
-    installed=0.2.3)") — the outdated side kept killing the current proxy and
-    serving requests through old code.
-    """
-    if not health:
-        return False
-    return _version_tuple(health.get("version")) < _version_tuple(__version__)
+
+def _terminate_pid(pid: int, timeout: float = 5.0) -> None:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+    deadline = time.time() + timeout
+    while _pid_alive(pid) and time.time() < deadline:
+        time.sleep(0.1)
+    if _pid_alive(pid) and hasattr(signal, "SIGKILL"):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
 
 
 def ensure_proxy_running(config: Config | None = None) -> dict[str, Any]:
-    """Start the proxy if not already healthy AND current. Returns a status dict."""
-    import subprocess
-    import sys
-
     cfg = config or get_config()
-
     existing = health_check(cfg)
-    if existing is not None:
-        if not _proxy_outdated(existing):
+    if _matching_health(existing, cfg):
+        if _version_tuple(existing.get("version")) >= _version_tuple(__version__):
             return {"status": "already-running", "health": existing, "port": cfg.port}
-        # Proxy from an older install — replace it so the upgrade actually
-        # takes effect. (Never the other way around: see _proxy_outdated.)
-        logger.info(
-            "replacing outdated proxy (running=%s, installed=%s)",
-            existing.get("version"), __version__,
-        )
         stop_proxy(cfg)
-        deadline = time.time() + 5
-        while health_check(cfg) is not None and time.time() < deadline:
-            time.sleep(0.2)
-        if health_check(cfg) is not None:
-            # Could not take the old one down (e.g. foreign process without a
-            # pid file) — keep serving rather than breaking the session.
-            return {
-                "status": "already-running",
-                "health": existing,
-                "port": cfg.port,
-                "stale": True,
-            }
+    elif existing:
+        return {
+            "status": "failed",
+            "reason": "profile port collision",
+            "port": cfg.port,
+        }
 
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
-
-    # Best-effort single-flight lock; stale locks are ignored after start fails.
     try:
-        fd = os.open(str(cfg.lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.close(fd)
-        acquired = True
+        lock_fd = os.open(cfg.lock_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        acquired = False
-
-    cfg.log_file.parent.mkdir(parents=True, exist_ok=True)
-    log_handle = cfg.log_file.open("ab", buffering=0)
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "hermes_claude_code.proxy",
-            "--host",
-            cfg.host,
-            "--port",
-            str(cfg.port),
-        ],
-        stdout=log_handle,
-        stderr=log_handle,
-        start_new_session=True,
-    )
-    cfg.pid_file.write_text(str(proc.pid))
-
-    deadline = time.time() + cfg.startup_timeout
-    while time.time() < deadline:
-        health = health_check(cfg)
-        if health is not None:
-            if acquired:
-                _safe_unlink(cfg.lock_file)
-            return {"status": "started", "pid": proc.pid, "health": health, "port": cfg.port}
-        if proc.poll() is not None:
-            break
-        time.sleep(0.25)
-
-    if acquired:
+        deadline = time.time() + cfg.startup_timeout
+        while time.time() < deadline:
+            health = health_check(cfg)
+            if _matching_health(health, cfg):
+                return {"status": "already-running", "health": health, "port": cfg.port}
+            time.sleep(0.2)
+        try:
+            if time.time() - cfg.lock_file.stat().st_mtime <= cfg.startup_timeout:
+                return {
+                    "status": "failed",
+                    "reason": "proxy startup already in progress",
+                    "port": cfg.port,
+                }
+        except FileNotFoundError:
+            return ensure_proxy_running(cfg)
         _safe_unlink(cfg.lock_file)
-    return {"status": "failed", "port": cfg.port}
+        return ensure_proxy_running(cfg)
+    else:
+        os.close(lock_fd)
+
+    instance = uuid.uuid4().hex
+    env = dict(os.environ)
+    env["HERMES_CLAUDE_CODE_INSTANCE_ID"] = instance
+    cfg.log_file.parent.mkdir(parents=True, exist_ok=True)
+    creation: dict[str, Any] = {}
+    if sys.platform == "win32":
+        creation["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        creation["start_new_session"] = True
+    process: subprocess.Popen | None = None
+    try:
+        with cfg.log_file.open("ab", buffering=0) as log_handle:
+            process = subprocess.Popen(
+                [sys.executable, "-m", "hermes_claude_code.proxy"],
+                stdout=log_handle,
+                stderr=log_handle,
+                env=env,
+                **creation,
+            )
+        _private_atomic_json(
+            cfg.pid_file,
+            {
+                "pid": process.pid,
+                "instance": instance,
+                "profile": cfg.profile,
+                "started": time.time(),
+            },
+        )
+        deadline = time.time() + cfg.startup_timeout
+        while time.time() < deadline:
+            health = health_check(cfg)
+            if (
+                _matching_health(health, cfg)
+                and health.get("instance") == instance
+                and health.get("version") == __version__
+            ):
+                return {
+                    "status": "started",
+                    "pid": process.pid,
+                    "health": health,
+                    "port": cfg.port,
+                }
+            if process.poll() is not None:
+                break
+            time.sleep(0.2)
+        _terminate_pid(process.pid)
+        _safe_unlink(cfg.pid_file)
+        return {
+            "status": "failed",
+            "reason": "proxy did not become healthy",
+            "port": cfg.port,
+        }
+    finally:
+        _safe_unlink(cfg.lock_file)
 
 
 def stop_proxy(config: Config | None = None) -> dict[str, Any]:
     cfg = config or get_config()
-    pid = _read_pid(cfg)
-    if pid and _pid_alive(pid):
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
+    record = _read_pid_record(cfg)
+    if not record:
         _safe_unlink(cfg.pid_file)
         _safe_unlink(cfg.legacy_pid_file)
         _safe_unlink(cfg.lock_file)
-        return {"status": "stopped", "pid": pid}
+        return {"status": "not-running"}
+    health = health_check(cfg)
+    if not (
+        _matching_health(health, cfg)
+        and health.get("instance") == record.get("instance")
+        and record.get("profile") == cfg.profile
+    ):
+        return {"status": "refused", "reason": "process identity mismatch"}
+    pid = int(record["pid"])
+    _terminate_pid(pid)
     _safe_unlink(cfg.pid_file)
     _safe_unlink(cfg.legacy_pid_file)
     _safe_unlink(cfg.lock_file)
-    return {"status": "not-running"}
+    return {"status": "stopped" if not _pid_alive(pid) else "failed", "pid": pid}
 
 
 def proxy_status(config: Config | None = None) -> dict[str, Any]:
     cfg = config or get_config()
     health = health_check(cfg)
-    pid = _read_pid(cfg)
+    record = _read_pid_record(cfg)
+    matching = _matching_health(health, cfg)
     return {
-        "running": health is not None,
-        "health": health,
-        "pid": pid if (pid and _pid_alive(pid)) else None,
+        "running": matching,
+        "health": health if matching else None,
+        "pid": record.get("pid")
+        if record and matching and _pid_alive(record["pid"])
+        else None,
         "base_url": cfg.base_url,
         "port": cfg.port,
+        "profile": cfg.profile,
     }
 
 
-def _safe_unlink(path) -> None:
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        pass
-    except Exception:
-        pass
-
-
-# --------------------------------------------------------------------------- #
-# Entrypoint
-# --------------------------------------------------------------------------- #
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Hermes Claude Code proxy")
-    parser.add_argument("--host", default=None)
-    parser.add_argument("--port", type=int, default=None)
-    args = parser.parse_args(argv)
-
+    parser = argparse.ArgumentParser(description="Hermes Claude Code localhost proxy")
+    parser.parse_args(argv)
     cfg = get_config()
-    if args.host:
-        cfg.host = args.host
-    if args.port:
-        cfg.port = args.port
-
     import uvicorn
 
-    app = create_app(config=cfg)
-    uvicorn.run(app, host=cfg.host, port=cfg.port, log_level="warning")
+    uvicorn.run(
+        create_app(config=cfg),
+        host=cfg.host,
+        port=cfg.port,
+        log_level="warning",
+        limit_concurrency=cfg.max_concurrent_requests + 4,
+        timeout_keep_alive=10,
+    )
 
 
 if __name__ == "__main__":

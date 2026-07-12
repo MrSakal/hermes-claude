@@ -1,25 +1,20 @@
 [project]
 name = "hermes-claude-code"
-version = "0.4.0"
-description = "Hermes model provider backed by Claude Code (local OpenAI-compatible bridge)"
+version = "1.0.0"
+description = "Hermes provider for Claude Code subscriptions"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
-authors = [{ name = "Nous Research" }]
+authors = [{ name = "MrS4k4l" }]
 dependencies = [
+    "claude-agent-sdk>=0.2.110",
     "fastapi>=0.138.1",
     "httpx>=0.28.1",
     "uvicorn>=0.49.0",
-    "pydantic>=2.0",
-]
-
-[project.optional-dependencies]
-sdk = [
-    "claude-agent-sdk>=0.2.110",
 ]
 
 [project.scripts]
 hermes-claude-code = "hermes_claude_code.cli:main"
-hermes-claude-code-proxy = "hermes_claude_code.proxy:main"
 
 [build-system]
 requires = ["hatchling"]

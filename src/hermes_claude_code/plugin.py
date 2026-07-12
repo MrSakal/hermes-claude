@@ -21,6 +21,7 @@ directory layout each expects):
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from typing import Any
 
@@ -28,6 +29,8 @@ from .config import get_config
 from .doctor import format_report, run_doctor
 from .provider import register as register_provider_profile
 from .proxy import ensure_proxy_running, proxy_status, stop_proxy
+
+logger = logging.getLogger("hermes_claude_code.plugin")
 
 
 def _status_text() -> str:
@@ -137,32 +140,41 @@ def register(ctx=None) -> None:
 
     def _on_session_start(**_kwargs: Any) -> None:
         try:
-            ensure_proxy_running()
+            outcome = ensure_proxy_running()
+            if outcome.get("status") == "failed":
+                logger.error("proxy startup failed: %s", outcome)
         except Exception:
-            pass  # never break a session over proxy startup
+            logger.exception("proxy startup hook failed")
 
-    try:
-        ctx.register_hook("on_session_start", _on_session_start)
-    except Exception:
-        pass
-
-    try:
-        ctx.register_cli_command(
-            name="claude-code",
-            help="Manage the Hermes Claude Code provider proxy",
-            setup_fn=_cli_setup,
-            handler_fn=_cli_handler,
-            description="Status/start/stop/doctor for the Claude Code bridge proxy.",
-        )
-    except Exception:
-        pass
-
-    try:
-        ctx.register_command(
-            "claude-code",
-            handler=_slash_handler,
-            description="Hermes Claude Code proxy status/control",
-            args_hint="status|start|stop|doctor",
-        )
-    except Exception:
-        pass
+    registrations = (
+        ("register_hook", ("on_session_start", _on_session_start), {}),
+        (
+            "register_cli_command",
+            (),
+            {
+                "name": "claude-code",
+                "help": "Manage the Hermes Claude Code provider proxy",
+                "setup_fn": _cli_setup,
+                "handler_fn": _cli_handler,
+                "description": "Status/start/stop/doctor for the Claude Code bridge proxy.",
+            },
+        ),
+        (
+            "register_command",
+            ("claude-code",),
+            {
+                "handler": _slash_handler,
+                "description": "Hermes Claude Code proxy status/control",
+                "args_hint": "status|start|stop|doctor",
+            },
+        ),
+    )
+    for method_name, args, kwargs in registrations:
+        method = getattr(ctx, method_name, None)
+        if method is None:
+            logger.debug("Hermes context does not support %s", method_name)
+            continue
+        try:
+            method(*args, **kwargs)
+        except Exception:
+            logger.exception("Hermes registration failed: %s", method_name)

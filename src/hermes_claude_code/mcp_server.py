@@ -105,8 +105,8 @@ def build_sdk_mcp_server(
         return None, [], []
     try:
         from claude_agent_sdk import create_sdk_mcp_server, tool
-    except Exception:
-        return None, [], []
+    except ImportError as exc:
+        raise RuntimeError("claude-agent-sdk MCP support is required") from exc
 
     captured: list[dict[str, Any]] = []
     sdk_tools = []

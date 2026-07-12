@@ -37,10 +37,16 @@ def test_models_advertise_subscription_safe_context_length(make_client):
         assert m["context_length"] == 200_000
 
 
-def test_context_length_env_override(monkeypatch):
+def test_context_length_env_override_is_ignored(monkeypatch):
     from hermes_claude_code.config import get_config
 
     monkeypatch.setenv("HERMES_CLAUDE_CODE_CONTEXT_LENGTH", "1000000")
-    assert get_config().context_length == 1_000_000
-    monkeypatch.delenv("HERMES_CLAUDE_CODE_CONTEXT_LENGTH")
     assert get_config().context_length == 200_000
+
+
+def test_models_requires_local_bearer_auth(make_client):
+    client = make_client()
+    del client.headers["Authorization"]
+    assert client.get("/v1/models").status_code == 401
+    client.headers["Authorization"] = "Bearer wrong"
+    assert client.get("/v1/models").status_code == 401

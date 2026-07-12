@@ -1,51 +1,24 @@
-"""Configuration for the Hermes Claude Code plugin.
-
-All knobs are read from the environment with sane localhost-only defaults.
-Nothing here imports Hermes or the Claude SDK so it is safe to load in any
-context (plugin register, proxy subprocess, tests).
-"""
+"""Fixed, subscription-only configuration for the Hermes Claude Code plugin."""
 
 from __future__ import annotations
 
+import hashlib
 import os
+import secrets
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 PROVIDER_NAME = "hermes-claude-code"
-# NB: do NOT use "claude-code" here — it is a built-in alias of Hermes' own
-# ``anthropic`` provider (the raw Anthropic API/OAuth path) and would collide.
 PROVIDER_ALIASES = ("claude-code-agent", "hermes_claude_code")
 DISPLAY_NAME = "Claude Code"
-DESCRIPTION = "Claude Code via local OpenAI-compatible Hermes bridge"
-# ProviderProfile.signup_url — "shown during first-run setup" per Hermes'
-# model-provider plugin docs. There's no web signup page (auth is `claude
-# login`, a CLI OAuth flow), so this points at our own install instructions
-# instead of a generic marketing page.
+DESCRIPTION = "Claude Code subscription via a local Hermes bridge"
 SIGNUP_URL = "https://github.com/MrS4k4l/hermes-claude#install"
-# Env var the Hermes api-key auth layer reads for our placeholder credential.
-# Listed in the profile's ``env_vars`` so Hermes' auto-extend registers us.
 API_KEY_ENV_VAR = "HERMES_CLAUDE_CODE_API_KEY"
-# Env var the Hermes auth layer can use to override the proxy base URL.
 BASE_URL_ENV_VAR = "HERMES_CLAUDE_CODE_BASE_URL"
-# Env var holding an explicit comma-separated model list. When set, it wins
-# over both the probed working-set cache and the built-in defaults.
-MODELS_ENV_VAR = "HERMES_CLAUDE_CODE_MODELS"
-# Non-empty placeholder key. The proxy is a local trusted endpoint and needs no
-# real credential, but the api-key resolver (and OpenAI SDK) reject an empty
-# api_key string, so we publish this constant into the env via ``register()``.
-LOCAL_API_KEY = "hermes-claude-code-local"
 
-DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 35345
-# The picker shows human-readable labels while routing through Claude Code's
-# official subscription-safe aliases. The installed Claude Code resolves those
-# aliases to its current recommended model (for example, `sonnet` → Sonnet 5
-# on v2.1.197+), so the labels do not pin a billable model ID.
-# `opusplan` (Opus for plan mode, Sonnet for execution) and `best` (Fable when
-# available, else latest Opus) are documented modes and remain selectors.
-# Deliberately omit 1M variants (`sonnet[1m]`, `opus[1m]`): they bill as extra
-# usage on every plan. The first entry doubles as the default model.
+# This bridge is intentionally subscription-only. Only Claude Code aliases that
+# cannot opt into a pinned/1M API-billed model are accepted.
 DEFAULT_MODELS = (
     "Sonnet 5",
     "Opus 4.8",
@@ -54,137 +27,137 @@ DEFAULT_MODELS = (
     "best",
     "opusplan",
 )
-# Display labels and old picker values map to a supported Claude Code selector.
-# Anything else — full IDs like `claude-opus-4-8`, `sonnet[1m]`, ... — passes
-# through untouched.
 MODEL_ID_ALIASES = {
-    "Fable 5": "fable",
-    "Opus 4.8": "opus",
     "Sonnet 5": "sonnet",
+    "Opus 4.8": "opus",
     "Haiku 4.5": "haiku",
-    "Sonnet 4.6": "sonnet",
+    "Fable 5": "fable",
+    "sonnet": "sonnet",
+    "opus": "opus",
+    "haiku": "haiku",
+    "fable": "fable",
+    "best": "best",
+    "opusplan": "opusplan",
 }
 FALLBACK_MODELS = DEFAULT_MODELS
 MODEL_OWNER = "anthropic-claude-code"
-# Cheap/fast model Hermes should use for auxiliary work (vision summaries,
-# context compression, memory flushes) so those never burn the main model.
-# A catalog display name so the proxy maps it via MODEL_ID_ALIASES.
 DEFAULT_AUX_MODEL = "haiku"
 
+LOCAL_HOST = "127.0.0.1"
+DEFAULT_PORT = 35345
+CONTEXT_LENGTH = 200_000
+REQUEST_TIMEOUT = 600.0
+STARTUP_TIMEOUT = 30.0
+MAX_REQUEST_BYTES = 32 * 1024 * 1024
+MAX_CONCURRENT_REQUESTS = 4
 
-def hermes_home() -> Path:
-    """Return the Hermes home directory.
 
-    Must mirror ``hermes_constants._get_platform_default_hermes_home()`` in
-    the real Hermes source exactly, or ``hermes-claude-code install`` writes
-    the discovery dirs into a path Hermes never looks at. Verified live on
-    Windows: with ``HERMES_HOME`` unset, real Hermes resolves to
-    ``%LOCALAPPDATA%\\hermes`` — *not* ``~/.hermes`` (that's the
-    Linux/macOS-only default). Getting this wrong is silent: `install`
-    reports success, but the provider never appears in `hermes model`.
-    """
-    env = os.environ.get("HERMES_HOME", "").strip()
-    if env:
-        return Path(env).expanduser()
+def _platform_default_home() -> Path:
     if sys.platform == "win32":
         local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
-        base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
+        base = (
+            Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
+        )
         return base / "hermes"
     return Path.home() / ".hermes"
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if not raw:
-        return default
+def hermes_home() -> Path:
+    """Mirror Hermes' platform-native home resolution."""
+    env = os.environ.get("HERMES_HOME", "").strip()
+    return Path(env).expanduser() if env else _platform_default_home()
+
+
+def profile_id(home: Path | None = None) -> str:
+    value = str((home or hermes_home()).expanduser().resolve())
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+def profile_port(home: Path | None = None) -> int:
+    """Stable per-profile port; preserve 35345 for the platform default profile."""
+    selected = (home or hermes_home()).expanduser().resolve()
+    if selected == _platform_default_home().expanduser().resolve():
+        return DEFAULT_PORT
+    return 36_000 + int(profile_id(selected)[:8], 16) % 20_000
+
+
+def _chmod(path: Path, mode: int) -> None:
+    if sys.platform != "win32":
+        os.chmod(path, mode)
+
+
+def proxy_token(home: Path | None = None) -> str:
+    """Load or atomically create the profile-local 256-bit proxy credential."""
+    run_dir = (home or hermes_home()) / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _chmod(run_dir, 0o700)
+    path = run_dir / "hermes-claude-code.token"
+    if path.is_symlink():
+        raise RuntimeError(f"Refusing symlink proxy token: {path}")
     try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return default
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if not raw:
-        return default
+        token = path.read_text(encoding="utf-8").strip()
+        if len(token) >= 43:
+            _chmod(path, 0o600)
+            return token
+    except FileNotFoundError:
+        pass
+    token = secrets.token_urlsafe(32)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return default
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError:
+        token = path.read_text(encoding="utf-8").strip()
+        if len(token) < 43:
+            raise RuntimeError(f"Invalid proxy token file: {path}")
+        return token
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(token + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    return token
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in ("1", "true", "yes", "on")
-
-
-def _env_models(name: str, default: tuple) -> tuple:
-    """Parse a comma-separated model list from the environment.
-
-    Entries can be display names from ``MODEL_ID_ALIASES`` (mapped to Claude
-    Code aliases by the bridge) or raw Claude Code selectors passed through
-    verbatim — e.g. ``sonnet[1m]``, ``opusplan``, or a pinned model ID (the
-    latter bills as extra usage, so only use one deliberately).
-    """
-    raw = os.environ.get(name)
-    if not raw:
-        return default
-    models = tuple(m.strip() for m in raw.split(",") if m.strip())
-    return models or default
-
-
-@dataclass
+@dataclass(frozen=True)
 class Config:
-    """Resolved runtime configuration for proxy + bridge."""
+    """Runtime policy. Security- and billing-sensitive values are not tunable."""
 
-    host: str = DEFAULT_HOST
-    port: int = DEFAULT_PORT
-    # "strict" = surface tool calls back to Hermes (default, best compat).
-    # "agentic" = let Claude Code run tools internally via MCP.
-    mode: str = "strict"
-    cwd: str | None = None
-    request_timeout: float = 600.0
-    startup_timeout: float = 30.0
-    # When True (the default), the bridge strips API-key/billing env vars
-    # (ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL) from the
-    # backend subprocess so Claude Code always uses the `claude login`
-    # subscription (OAuth). Verified live: an inherited key silently rerouted
-    # every request to extra-usage billing while Hermes' own env-stripped
-    # smoke test worked. Subscription use is this plugin's entire contract —
-    # opt OUT with HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION=0 if you really
-    # want inherited API-key billing.
-    force_subscription: bool = True
-    # Advertised context window (tokens). 200k is the subscription-safe
-    # boundary: above it Claude Code flips to 1M-context mode, which bills as
-    # extra usage on every plan (see models_payload). Raise it deliberately
-    # via HERMES_CLAUDE_CODE_CONTEXT_LENGTH only if you have extra-usage
-    # credits and want long-context requests.
-    context_length: int = 200_000
-    # When True (the default), requests estimated to exceed context_length are
-    # REJECTED with a 400 instead of forwarded — fail-closed. Forwarding one
-    # would flip Claude Code into 1M-context mode (extra-usage billing on
-    # every plan), so the guaranteed-subscription contract requires an error,
-    # never a surprise bill. Hermes normally compresses context to the
-    # advertised window, so this only fires on accounting mismatches. Opt out
-    # with HERMES_CLAUDE_CODE_ENFORCE_CONTEXT_LIMIT=0 (requests then pass
-    # through with a log warning, as before).
-    enforce_context_limit: bool = True
-    fallback_models: tuple = FALLBACK_MODELS
-    models: tuple = DEFAULT_MODELS
+    home: Path = field(default_factory=hermes_home, repr=False)
+    port: int = 0
+    api_key: str = field(default="", repr=False)
+    profile: str = ""
+    request_timeout: float = REQUEST_TIMEOUT
+    startup_timeout: float = STARTUP_TIMEOUT
+    context_length: int = CONTEXT_LENGTH
+    max_request_bytes: int = MAX_REQUEST_BYTES
+    max_concurrent_requests: int = MAX_CONCURRENT_REQUESTS
+    models: tuple[str, ...] = DEFAULT_MODELS
+    fallback_models: tuple[str, ...] = FALLBACK_MODELS
+
+    def __post_init__(self) -> None:
+        home = self.home.expanduser().resolve()
+        object.__setattr__(self, "home", home)
+        if not self.port:
+            object.__setattr__(self, "port", profile_port(home))
+        if not self.api_key:
+            object.__setattr__(self, "api_key", proxy_token(home))
+        if not self.profile:
+            object.__setattr__(self, "profile", profile_id(home))
+
+    @property
+    def host(self) -> str:
+        return LOCAL_HOST
 
     @property
     def base_url(self) -> str:
-        return f"http://{self.host}:{self.port}/v1"
+        return f"http://{LOCAL_HOST}:{self.port}/v1"
 
     @property
     def health_url(self) -> str:
-        return f"http://{self.host}:{self.port}/health"
+        return f"http://{LOCAL_HOST}:{self.port}/health"
 
     @property
     def run_dir(self) -> Path:
-        return hermes_home() / "run"
+        return self.home / "run"
 
     @property
     def lock_file(self) -> Path:
@@ -192,52 +165,20 @@ class Config:
 
     @property
     def pid_file(self) -> Path:
-        # Deliberately NOT the pre-0.3.7 name ("hermes-claude-code.pid"):
-        # plugin versions before 0.3.2 replace any proxy whose version merely
-        # differs from their own — including NEWER ones — by killing the pid
-        # from this file. Verified live: a leftover 0.3.1 install kept
-        # murdering the current proxy ("replacing stale proxy
-        # (running=0.3.6, installed=0.3.1)"). Those versions can't see this
-        # file name, so their stop is a no-op and they gracefully fall back
-        # to USING the newer proxy instead.
         return self.run_dir / "hermes-claude-code.proxy.pid"
 
     @property
     def legacy_pid_file(self) -> Path:
-        # Still read (never written) so current code can stop/replace proxies
-        # started by pre-0.3.7 versions.
         return self.run_dir / "hermes-claude-code.pid"
 
     @property
     def backend_workdir(self) -> Path:
-        # Isolated, empty working directory for the Claude Code backend when
-        # the request doesn't ask for a specific cwd. Claude Code gathers
-        # context from its working directory (git status, files) and pulls it
-        # into the system prompt; a pure LLM bridge must not leak the host
-        # process's cwd into prompts. This also avoids Anthropic's confirmed
-        # harness-detection bug where "hermes"-named git content in the
-        # gathered context flipped sessions to extra-usage billing.
         return self.run_dir / "workdir"
 
     @property
     def log_file(self) -> Path:
-        return hermes_home() / "logs" / "hermes-claude-code.log"
+        return self.home / "logs" / "hermes-claude-code.log"
 
 
 def get_config() -> Config:
-    """Build a Config from the current environment."""
-    return Config(
-        host=os.environ.get("HERMES_CLAUDE_CODE_HOST", DEFAULT_HOST),
-        port=_env_int("HERMES_CLAUDE_CODE_PORT", DEFAULT_PORT),
-        mode=os.environ.get("HERMES_CLAUDE_CODE_MODE", "strict").strip().lower()
-        or "strict",
-        cwd=os.environ.get("HERMES_CLAUDE_CODE_CWD") or None,
-        request_timeout=_env_float("HERMES_CLAUDE_CODE_TIMEOUT", 600.0),
-        startup_timeout=_env_float("HERMES_CLAUDE_CODE_STARTUP_TIMEOUT", 30.0),
-        force_subscription=_env_bool("HERMES_CLAUDE_CODE_FORCE_SUBSCRIPTION", True),
-        models=_env_models(MODELS_ENV_VAR, DEFAULT_MODELS),
-        context_length=_env_int("HERMES_CLAUDE_CODE_CONTEXT_LENGTH", 200_000),
-        enforce_context_limit=_env_bool(
-            "HERMES_CLAUDE_CODE_ENFORCE_CONTEXT_LIMIT", True
-        ),
-    )
+    return Config()

@@ -91,11 +91,11 @@ def test_stream_chunk_exposes_reasoning_content_delta_for_hermes_display():
     assert payload["choices"][0]["delta"]["reasoning_content"] == "thinking"
 
 
-def test_strict_mode_prefers_captured_mcp_calls_over_text_when_sdk_handler_runs():
+def test_captured_mcp_calls_replace_text():
     result = BridgeResult(text="I delegated it", finish_reason="stop")
     captured = [{"name": "lookup", "arguments": {"q": "x"}}]
 
-    strict = result.with_captured_tool_calls(captured, mode="strict")
+    strict = result.with_captured_tool_calls(captured)
 
     assert strict.text == ""
     assert strict.finish_reason == "tool_calls"

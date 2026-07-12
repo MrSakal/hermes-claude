@@ -99,7 +99,9 @@ def test_stream_tool_calls(make_client):
 
 def test_stream_tool_calls_logs_host_tool_call(make_client, monkeypatch):
     seen = []
-    monkeypatch.setattr(proxy, "_log_host_tool_calls", lambda origin, calls: seen.append((origin, calls)))
+    monkeypatch.setattr(
+        proxy, "_log_tool_calls", lambda origin, calls: seen.append((origin, calls))
+    )
     tc = {
         "id": "call_0_lookup",
         "type": "function",

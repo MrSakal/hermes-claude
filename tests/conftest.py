@@ -49,7 +49,6 @@ def _hermetic_hermes_home(tmp_path, monkeypatch):
     ``get_config()`` defaults to the real proxy's port.
     """
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
-    monkeypatch.setenv("HERMES_CLAUDE_CODE_PORT", str(free_port()))
     _reset_package_logger()
     yield
     _reset_package_logger()
@@ -98,7 +97,7 @@ class FakeBridge:
 
 @pytest.fixture
 def config() -> Config:
-    return Config(host="127.0.0.1", port=free_port())
+    return Config(port=free_port())
 
 
 @pytest.fixture
@@ -108,6 +107,9 @@ def make_client(config):
     from hermes_claude_code.proxy import create_app
 
     def _make(bridge=None, cfg=None):
-        return TestClient(create_app(bridge=bridge or FakeBridge(), config=cfg or config))
+        selected = cfg or config
+        client = TestClient(create_app(bridge=bridge or FakeBridge(), config=selected))
+        client.headers["Authorization"] = f"Bearer {selected.api_key}"
+        return client
 
     return _make

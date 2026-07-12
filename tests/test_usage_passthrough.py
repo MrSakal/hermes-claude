@@ -69,7 +69,7 @@ def test_with_captured_tool_calls_preserves_usage():
         usage={"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
     )
     merged = result.with_captured_tool_calls(
-        [{"name": "web_search", "arguments": {"query": "x"}}], mode="strict"
+        [{"name": "web_search", "arguments": {"query": "x"}}]
     )
     assert merged.finish_reason == "tool_calls"
     assert merged.usage == result.usage
@@ -83,7 +83,7 @@ def test_nonstream_response_carries_backend_usage(make_client):
     client = make_client(bridge=FakeBridge(result=BridgeResult(text="hi", usage=usage)))
     resp = client.post(
         "/v1/chat/completions",
-        json={"model": "Sonnet 4.6", "messages": [{"role": "user", "content": "hey"}]},
+        json={"model": "Sonnet 5", "messages": [{"role": "user", "content": "hey"}]},
     )
     assert resp.status_code == 200
     assert resp.json()["usage"] == usage
@@ -93,7 +93,7 @@ def test_nonstream_response_defaults_to_zero_usage(make_client):
     client = make_client(bridge=FakeBridge(result=BridgeResult(text="hi")))
     resp = client.post(
         "/v1/chat/completions",
-        json={"model": "Sonnet 4.6", "messages": [{"role": "user", "content": "hey"}]},
+        json={"model": "Sonnet 5", "messages": [{"role": "user", "content": "hey"}]},
     )
     assert resp.status_code == 200
     assert resp.json()["usage"] == {
@@ -109,14 +109,14 @@ def test_stream_terminal_chunk_carries_usage(make_client):
     resp = client.post(
         "/v1/chat/completions",
         json={
-            "model": "Sonnet 4.6",
+            "model": "Sonnet 5",
             "messages": [{"role": "user", "content": "hey"}],
             "stream": True,
         },
     )
     assert resp.status_code == 200
     chunks = [
-        json.loads(line[len("data: "):])
+        json.loads(line[len("data: ") :])
         for line in resp.text.splitlines()
         if line.startswith("data: ") and line != "data: [DONE]"
     ]
