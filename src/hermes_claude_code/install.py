@@ -45,7 +45,8 @@ provides_hooks:
   - on_session_start
 '''
 
-# Exact v0.4.0 shim pairs. These are the only non-v1 files install() may replace.
+# Exact previously released shim pairs. These are the only non-current files
+# install() may replace.
 _LEGACY_OWNED_DIGESTS = frozenset(
     {
         (
@@ -63,6 +64,14 @@ _LEGACY_OWNED_DIGESTS = frozenset(
         (
             "732bd7d562e978a57b8c02c365408fcbb32ff5b06aa2f40387bde65734c56dde",
             "3c2ba93812d7eb434aea1c81236a0d17a43591fc4c821e1161d62576661c6afe",
+        ),
+        (
+            "f97535f21589833074c8347ec4b9f8dc6881650921a1c8da43bc94a255977c3d",
+            "9c211600f8c1f900276c5dc6bb3a35ed3471a88143867e25780dbddba68b5354",
+        ),
+        (
+            "b015d1d0f752de7ceaf76dc2a19318f588de71e1edb4dbd261608e4a2f2529f4",
+            "ddc90c25a46ae869cbc96e42ed2720753ab844df4eeabde2b1e8475e1a57cef0",
         ),
     }
 )
