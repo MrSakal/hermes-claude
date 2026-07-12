@@ -46,7 +46,8 @@ The plugin intentionally has no billing- or security-sensitive settings:
 - OAuth subscription authentication only
 - Agent SDK only; no CLI execution fallback
 - `127.0.0.1` only, with a per-profile port and private bearer token
-- 200,000-token advertised context; requests reserve 10% for output
+- native context advertised per model: 1M for Sonnet 5, Opus 4.8, Fable 5,
+  `best`, and `opusplan`; 200k for Haiku 4.5; requests reserve 10% for output
 - strict one-turn Hermes tool delegation; Claude native tools disabled
 - isolated empty working directory; request `cwd` and session `resume` rejected
 - API-key, endpoint, permission-mode, model-list, timeout, context, and port overrides ignored

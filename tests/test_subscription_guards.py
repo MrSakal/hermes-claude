@@ -36,21 +36,30 @@ def test_chat_endpoint_rejects_missing_and_wrong_token(make_client):
     assert client.post("/v1/chat/completions", json=payload).status_code == 401
 
 
-def test_context_limit_is_always_fail_closed(make_client):
+def test_context_limit_uses_selected_model_window(make_client):
     client = make_client()
-    response = client.post(
-        "/v1/chat/completions",
-        json={"messages": [{"role": "user", "content": "x" * 800_000}]},
+    payload = {
+        "messages": [{"role": "user", "content": "x" * 800_000}],
+    }
+    haiku = client.post(
+        "/v1/chat/completions", json={**payload, "model": "Haiku 4.5"}
     )
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "context_length_exceeded"
+    sonnet = client.post(
+        "/v1/chat/completions", json={**payload, "model": "Sonnet 5"}
+    )
+    assert haiku.status_code == 400
+    assert haiku.json()["error"]["code"] == "context_length_exceeded"
+    assert sonnet.status_code == 200
 
 
 def test_legacy_context_disable_env_is_ignored(monkeypatch, make_client):
     monkeypatch.setenv("HERMES_CLAUDE_CODE_ENFORCE_CONTEXT_LIMIT", "0")
     response = make_client().post(
         "/v1/chat/completions",
-        json={"messages": [{"role": "user", "content": "x" * 800_000}]},
+        json={
+            "model": "Haiku 4.5",
+            "messages": [{"role": "user", "content": "x" * 800_000}],
+        },
     )
     assert response.status_code == 400
 

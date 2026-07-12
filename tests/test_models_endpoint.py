@@ -26,15 +26,19 @@ def test_models_endpoint(make_client):
         assert m["owned_by"] == "anthropic-claude-code"
 
 
-def test_models_advertise_subscription_safe_context_length(make_client):
-    # Hermes reads context_length from /v1/models and sizes its context
-    # compression to it. 200k is the boundary above which Claude Code flips
-    # to 1M-context mode — billed as extra usage on every plan — so the
-    # default advertisement must stay at 200k.
+def test_models_advertise_native_context_lengths(make_client):
+    # Hermes reads context_length from /v1/models and sizes compression to it.
     resp = make_client().get("/v1/models")
     assert resp.status_code == 200
-    for m in resp.json()["data"]:
-        assert m["context_length"] == 200_000
+    models = {m["id"]: m["context_length"] for m in resp.json()["data"]}
+    assert models == {
+        "Sonnet 5": 1_000_000,
+        "Opus 4.8": 1_000_000,
+        "Haiku 4.5": 200_000,
+        "Fable 5": 1_000_000,
+        "best": 1_000_000,
+        "opusplan": 1_000_000,
+    }
 
 
 def test_context_length_env_override_is_ignored(monkeypatch):

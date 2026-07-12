@@ -17,8 +17,8 @@ SIGNUP_URL = "https://code.claude.com/docs/en/authentication"
 API_KEY_ENV_VAR = "HERMES_CLAUDE_CODE_API_KEY"
 BASE_URL_ENV_VAR = "HERMES_CLAUDE_CODE_BASE_URL"
 
-# This bridge is intentionally subscription-only. Only Claude Code aliases that
-# cannot opt into a pinned/1M API-billed model are accepted.
+# This bridge is intentionally subscription-only. Only Claude Code's
+# subscription-safe family and routing aliases are accepted.
 DEFAULT_MODELS = (
     "Sonnet 5",
     "Opus 4.8",
@@ -46,6 +46,18 @@ DEFAULT_AUX_MODEL = "haiku"
 LOCAL_HOST = "127.0.0.1"
 DEFAULT_PORT = 35345
 CONTEXT_LENGTH = 200_000
+MODEL_CONTEXT_LENGTHS = {
+    "Sonnet 5": 1_000_000,
+    "Opus 4.8": 1_000_000,
+    "Haiku 4.5": 200_000,
+    "Fable 5": 1_000_000,
+    "sonnet": 1_000_000,
+    "opus": 1_000_000,
+    "haiku": 200_000,
+    "fable": 1_000_000,
+    "best": 1_000_000,
+    "opusplan": 1_000_000,
+}
 REQUEST_TIMEOUT = 600.0
 STARTUP_TIMEOUT = 30.0
 MAX_REQUEST_BYTES = 32 * 1024 * 1024
@@ -182,3 +194,8 @@ class Config:
 
 def get_config() -> Config:
     return Config()
+
+
+def model_context_length(model: str, fallback: int = CONTEXT_LENGTH) -> int:
+    """Return the current native context window for an allowed model/alias."""
+    return MODEL_CONTEXT_LENGTHS.get(model, fallback)

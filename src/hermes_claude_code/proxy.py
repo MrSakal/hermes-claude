@@ -28,7 +28,7 @@ from .bridge import (
     prepare_conversation,
     sdk_available,
 )
-from .config import Config, MODEL_OWNER, get_config
+from .config import Config, MODEL_OWNER, get_config, model_context_length
 
 logger = logging.getLogger("hermes_claude_code.proxy")
 _ZERO_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -65,7 +65,7 @@ def models_payload(config: Config) -> dict[str, Any]:
                 "object": "model",
                 "created": _now(),
                 "owned_by": MODEL_OWNER,
-                "context_length": config.context_length,
+                "context_length": model_context_length(model, config.context_length),
             }
             for model in config.models
         ],
@@ -289,7 +289,8 @@ def create_app(bridge: Any | None = None, config: Config | None = None):
             return JSONResponse(status_code=400, content=error_payload(str(exc)))
 
         estimated_tokens = _estimate_input_tokens(payload)
-        safe_input_limit = int(cfg.context_length * 0.90)
+        context_length = model_context_length(conversation.model, cfg.context_length)
+        safe_input_limit = int(context_length * 0.90)
         if estimated_tokens > safe_input_limit:
             return JSONResponse(
                 status_code=400,
