@@ -1,5 +1,0 @@
-name: hermes-claude-code
-kind: model-provider
-version: "1.0.0"
-description: "Claude Code subscription via a local Hermes bridge"
-author: MrS4k4l

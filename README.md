@@ -1,79 +1,375 @@
-# Hermes Claude Code
+# hermes-claude
 
-A Hermes model-provider plugin that routes chat, vision, reasoning, streaming, and Hermes tool calls through the official Claude Agent SDK using the user's **Claude Code subscription**.
+Use **Claude Code** from any OpenAI-compatible client — built as a local
+provider for **hermes**, but any OpenAI client works.
 
-No Anthropic API key is accepted or forwarded. Claude Code authentication is provided by `claude login` (or `CLAUDE_CODE_OAUTH_TOKEN`).
+A small HTTP server that makes the `claude` CLI look like an OpenAI API (the way
+LM Studio or Ollama do). Point any OpenAI client — hermes, the OpenAI Python SDK,
+Open WebUI, etc. — at it and you get Claude Code, using your existing
+`claude login` (no API key, no per-token billing).
+
+Under the hood it drives `claude` as a persistent subprocess over its
+`stream-json` protocol, one process per conversation. The Python package /
+console script is named `claude-code-interface` (config prefix `CCI_`).
+
+## What it does
+
+- **OpenAI surface:** `GET /v1/models` and `POST /v1/chat/completions`
+  (streaming + non-streaming).
+- **OpenAI function calling:** your client's `tools` are passed through to Claude
+  via an in-process MCP bridge. Claude calls them, the server returns a normal
+  `tool_calls` response, your client runs the tool and sends the result back, and
+  the same Claude subprocess resumes — the whole multi-step tool loop is one
+  conversation kept alive across continuations.
+- **Claude's own built-in tools** (Read/Edit/Bash/…) run internally the whole
+  time (unless bare mode strips them — see below).
+- **Bare model mode** (default on): presents Claude as a plain model fronted by
+  your client — replaces the system prompt, drops Claude Code's dynamic context,
+  and exposes only the tools your client sends.
+- **Markdown table flattening** (default on): rewrites pipe tables to fenced
+  ASCII so they render in clients that don't support Markdown tables (Discord).
+- **Ollama / llama.cpp compatibility shims** so capability-probing frontends
+  (Open WebUI, etc.) accept the server.
 
 ## Requirements
 
-- Hermes Agent 0.18.2 or newer
-- Python 3.11 or newer
-- Claude Code logged into a subscription: `claude auth status`
-
-Hermes provider plugins use `$HERMES_HOME/plugins/model-providers/`; general hooks require an enabled plugin under `$HERMES_HOME/plugins/`. This package installs both discovery shims, as required by the [Hermes provider](https://hermes-agent.nousresearch.com/docs/developer-guide/model-provider-plugin) and [plugin](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins) contracts.
+- The `claude` CLI on your `PATH`, already logged in (`claude login`).
+- Python 3.11+.
+- Works on Windows, Linux and macOS (uvloop is used automatically where
+  available; it does not exist on Windows — see Run).
 
 ## Install
 
-Install into the same Python environment that runs Hermes:
+Linux / macOS:
 
 ```bash
-git clone <repository-url> hermes-claude
-cd hermes-claude
-<hermes-python> -m pip install .
-hermes-claude-code install
-claude login
-hermes-claude-code doctor --live
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"
 ```
 
-Restart a running Hermes gateway, then select **Claude Code** with `hermes model`.
+Windows (PowerShell):
 
-## Upgrade from 0.x
+```powershell
+py -3.11 -m venv .venv
+.venv\Scripts\python -m pip install -e ".[dev]"
+```
 
-Stop the old proxy before replacing the package because 1.0 introduces authenticated, profile-isolated lifecycle metadata:
+## Run
+
+Linux / macOS:
 
 ```bash
-hermes-claude-code stop
-git pull --ff-only
-<hermes-python> -m pip install --upgrade .
-hermes-claude-code install
-hermes-claude-code doctor --live
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8787
+# or the console script, which pins uvloop + httptools explicitly:
+.venv/bin/claude-code-interface
 ```
 
-Restart every running Hermes gateway/dashboard process after the upgrade. The
-provider credential and curated model catalog are loaded at process startup.
+Windows (PowerShell):
 
-## Fixed policy
+```powershell
+.venv\Scripts\python -m uvicorn app.main:app --host 127.0.0.1 --port 8787
+```
 
-The plugin intentionally has no billing- or security-sensitive settings:
+> **Windows note:** use `python -m uvicorn` as above. The
+> `claude-code-interface` console script hard-requests `loop="uvloop"`, and
+> uvloop is not installed on Windows (`sys_platform != 'win32'` marker), so the
+> script fails to start there. Plain uvicorn works fine.
 
-- OAuth subscription authentication only
-- Agent SDK only; no CLI execution fallback
-- `127.0.0.1` only, with a per-profile port and private bearer token
-- native context advertised per model: 1M for Sonnet 5, Opus 4.8, Fable 5,
-  `best`, and `opusplan`; 200k for Haiku 4.5; requests reserve 10% for output
-- strict one-turn Hermes tool delegation; Claude native tools disabled
-- isolated empty working directory; request `cwd` and session `resume` rejected
-- API-key, endpoint, permission-mode, model-list, timeout, context, and port overrides ignored
-- fixed model picker: Sonnet 5, Opus 4.8, Haiku 4.5, Fable 5, `best`, `opusplan`
+Configuration is entirely through `CCI_*` environment variables (or a `.env`
+file). See the full list below.
 
-The localhost bearer token is generated automatically in `$HERMES_HOME/run/` with owner-only permissions. It authenticates Hermes to the proxy and is never sent to Anthropic.
+## Configuration
 
-## Commands
+Copy `.env.example` to `.env` and edit, or export the vars directly. Every field
+is overridable via `CCI_<FIELD>`.
 
 ```bash
-hermes-claude-code status
-hermes-claude-code start
-hermes-claude-code stop
-hermes-claude-code doctor [--live]
-hermes-claude-code models
-hermes-claude-code uninstall
+# claude-code-interface configuration (env prefix CCI_). Copy to .env or export.
+
+# ── HTTP server ──────────────────────────────────────────────────────────────
+CCI_HOST=127.0.0.1
+CCI_PORT=8787
+
+# ── Auth ─────────────────────────────────────────────────────────────────────
+# Optional bearer token gating every /v1 request. Safe to leave UNSET only on a
+# loopback bind. The server REFUSES to start on a non-loopback host unless this
+# is set — it drives Claude with bypassPermissions, so an open bind with no key
+# is remote code execution for anyone who can reach the port.
+# CCI_API_KEY=choose-a-long-random-secret
+
+# ── Claude CLI ───────────────────────────────────────────────────────────────
+CCI_CLAUDE_BIN=claude
+CCI_DEFAULT_MODEL=claude-opus-4-8
+# CCI_DEFAULT_EFFORT=high
+CCI_PERMISSION_MODE=bypassPermissions
+CCI_ENABLE_TOOL_SEARCH=false
+
+# ── Bare model mode ──────────────────────────────────────────────────────────
+# true (default): strip Claude Code's identity + native tools so it behaves as a
+# plain model fronted by your client — the request's system message REPLACES
+# claude's default prompt, dynamic context (env/git/identity) is dropped, and
+# only the MCP tools your client passes survive. false = legacy append + full
+# native tool set.
+CCI_BARE_MODEL_MODE=true
+# CCI_BARE_MODEL_SYSTEM_PROMPT=You are a helpful AI assistant.
+
+# ── Output formatting ────────────────────────────────────────────────────────
+# Rewrite Markdown pipe tables to fenced monospace ASCII so they render in
+# clients that don't support Markdown tables (e.g. Discord).
+CCI_FLATTEN_MARKDOWN_TABLES=true
+
+# ── Workspace (Claude's --add-dir) ───────────────────────────────────────────
+# Per-request `workdir` overrides must resolve under one of
+# CCI_ALLOWED_WORKDIR_ROOTS (a JSON list); empty => only the default is allowed.
+CCI_DEFAULT_WORKDIR=~/cci-workspace
+# CCI_ALLOWED_WORKDIR_ROOTS=["/home/you/Projects"]      # Windows: ["C:\\Projects"]
+
+# ── MCP bridge ───────────────────────────────────────────────────────────────
+# Path the in-process MCP server (your client's functions) mounts at; the
+# spawned claude dials it back over loopback. Rarely needs changing.
+# CCI_MCP_PATH_PREFIX=/mcp
+
+# ── Lifecycle (seconds) ──────────────────────────────────────────────────────
+CCI_REQUEST_TIMEOUT_S=600
+CCI_SUSPENDED_TTL_S=300
+CCI_IDLE_SESSION_TTL_S=900
+CCI_GC_INTERVAL_S=30
+
+# ── Warm subprocess pool ─────────────────────────────────────────────────────
+# Pre-spawned, idle `claude` procs kept ready to adopt on a fresh turn, removing
+# cold-start latency. 0 = disabled (default; ships dark). 1–2 is optimal for a
+# single user; larger pools waste RAM (~200 MB per idle proc) and can spike tail
+# latency through refill contention. See "Warm pool" below.
+CCI_WARM_POOL_SIZE=0
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+CCI_LOG_LEVEL=INFO
+# Emit per-turn latency metrics (spawn_ms / ttft_ms / total_ms / tok_per_s) to
+# the "cci.timing" logger at INFO. Off by default so normal operation pays
+# nothing; scripts/bench.py turns it on for the throwaway benchmark instance.
+CCI_TIMING_LOG=false
 ```
 
-## Development
+### Config reference
+
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `CCI_HOST` | `127.0.0.1` | Bind host. Non-loopback requires `CCI_API_KEY` (see Security). |
+| `CCI_PORT` | `8787` | Bind port. Also used to build the per-conversation MCP callback URL. |
+| `CCI_API_KEY` | _(unset)_ | Bearer token required on every `/v1` request when set. Mandatory for a non-loopback bind. |
+| `CCI_CLAUDE_BIN` | `claude` | Path to the `claude` CLI. |
+| `CCI_DEFAULT_MODEL` | `claude-opus-4-8` | Model used when the request names none / an unknown one. |
+| `CCI_DEFAULT_EFFORT` | _(unset)_ | Reasoning effort passed to `--effort` (e.g. `high`). |
+| `CCI_PERMISSION_MODE` | `bypassPermissions` | Claude CLI permission mode. |
+| `CCI_ENABLE_TOOL_SEARCH` | `false` | When false, tool schemas are injected directly (always visible) instead of behind tool-search. |
+| `CCI_BARE_MODEL_MODE` | `true` | Strip Claude Code identity + native tools; behave as a plain model. |
+| `CCI_BARE_MODEL_SYSTEM_PROMPT` | `You are a helpful AI assistant.` | Fallback system prompt in bare mode when a request sends none. |
+| `CCI_FLATTEN_MARKDOWN_TABLES` | `true` | Rewrite pipe tables to fenced ASCII. |
+| `CCI_DEFAULT_WORKDIR` | `~/cci-workspace` | Working dir granted to Claude via `--add-dir`. |
+| `CCI_ALLOWED_WORKDIR_ROOTS` | `[]` | JSON list of extra roots a per-request `workdir` may resolve under. |
+| `CCI_MCP_PATH_PREFIX` | `/mcp` | Mount path for the in-process MCP bridge. |
+| `CCI_REQUEST_TIMEOUT_S` | `600` | Per-turn upstream timeout. |
+| `CCI_SUSPENDED_TTL_S` | `300` | How long a tool-suspended conversation may wait for its results before GC. |
+| `CCI_IDLE_SESSION_TTL_S` | `900` | Idle conversation eviction age. |
+| `CCI_GC_INTERVAL_S` | `30` | GC sweep interval. |
+| `CCI_WARM_POOL_SIZE` | `0` | Pre-spawned idle `claude` procs (cold-start removal). 0 = off. |
+| `CCI_LOG_LEVEL` | `INFO` | Log level. |
+| `CCI_TIMING_LOG` | `false` | Emit per-turn latency metrics to the `cci.timing` logger. |
+
+## Security
+
+The server drives the Claude CLI with `permission_mode=bypassPermissions` by
+default, which means **anyone who can reach the port can run arbitrary code as
+your user.** Two interlocks guard this:
+
+1. **Non-loopback bind requires an API key.** `create_app()` refuses to start
+   when `CCI_HOST` is not a loopback address and `CCI_API_KEY` is unset:
+
+   ```
+   RuntimeError: refusing to start: host='0.0.0.0' is not loopback and no
+   api_key is set — set CCI_API_KEY to require a bearer token, or bind to 127.0.0.1
+   ```
+
+2. **Bearer auth on `/v1`.** When `CCI_API_KEY` is set, every `/v1` request must
+   carry `Authorization: Bearer <key>` (constant-time compared). The MCP mount is
+   intentionally exempt — it is reached only by the local Claude subprocess over
+   loopback and carries no token.
+
+**Recommended:** keep the bind on `127.0.0.1`. If you must expose it (containers,
+remote clients), set a long random `CCI_API_KEY` and put it behind TLS. Binding
+`0.0.0.0` / a public interface with no key will refuse to boot — by design.
+
+## Endpoints
+
+**OpenAI**
+- `POST /v1/chat/completions` — chat (streaming + non-streaming, tool calling)
+- `GET /v1/models` — model list
+- `GET /v1/models/{id}` — single model card
+
+**Health / info**
+- `GET /healthz` — `{"status":"ok",…}` (a JSON 404 here means the server is up but the route moved)
+- `GET /` — service info
+
+**Ollama / llama.cpp compatibility** (for capability-probing frontends)
+- `GET /api/tags`, `POST /api/show`, `GET /api/version`, `GET /version`
+- `GET /v1/props`, `GET /props`, `GET /api/v1/models`
+
+**Internal**
+- `/mcp/<conv_id>` — in-process MCP bridge, dialed only by the spawned Claude over loopback
+
+## Use it
+
+Any OpenAI client, `base_url = http://127.0.0.1:8787/v1`, any `api_key` when none
+is configured:
 
 ```bash
-uv sync
-uv run pytest
+curl http://127.0.0.1:8787/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"opus","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-Licensed under MIT.
+With `CCI_API_KEY` set, add the bearer header:
+
+```bash
+curl http://127.0.0.1:8787/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $CCI_API_KEY" \
+  -d '{"model":"opus","messages":[{"role":"user","content":"hello"}]}'
+```
+
+From **hermes**, add a provider in `~/.hermes/config.yaml` and select it:
+
+```yaml
+providers:
+  claude-code:
+    name: Claude Code
+    base_url: http://127.0.0.1:8787/v1
+    api_key: any-string-accepted   # or your CCI_API_KEY if one is set
+    api_mode: chat_completions
+    default_model: opus
+    models: [opus, sonnet, haiku]
+```
+
+Models: `opus`, `sonnet`, `haiku`, `fable`, `opusplan` (or any `claude-*` id).
+Unknown ids fall back to `CCI_DEFAULT_MODEL`; the CLI resolves an alias like
+`opus` to its current concrete version.
+
+## Warm pool
+
+A fresh turn normally pays the full cold start: fork the `claude` Node process,
+let it boot, handshake the MCP bridge, then produce a first token (~2.5 s TTFT on
+modest hardware). `CCI_WARM_POOL_SIZE=N` keeps `N` pre-spawned idle procs ready
+to adopt, lifting that cost off the request's critical path.
+
+- The pool holds **one signature at a time** (model + effort + workdir + system
+  prompt + tool set). A request whose signature matches a pooled proc adopts it;
+  anything else cold-spawns. The pool re-targets to live traffic.
+- Each adopted turn kicks a **background refill**. Under back-to-back load that
+  refill (a fresh Node boot) contends for CPU with the turn it's serving and can
+  spike tail latency; with normal human-gapped traffic the refill finishes in the
+  idle gap and you get the win cleanly.
+- Each idle proc costs ~200 MB RAM. **1–2 is optimal for a single user.** Larger
+  pools waste memory and amplify refill thrash when signatures interleave.
+
+Disabled by default (`0`), so it ships dark.
+
+## Running as a service
+
+### Linux (systemd user unit)
+
+Example `~/.config/systemd/user/hermes-claude.service`:
+
+```ini
+[Unit]
+Description=hermes-claude (Claude Code OpenAI server)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/youruser/hermes-claude
+EnvironmentFile=/home/youruser/hermes-claude/.env
+Environment=PATH=/home/youruser/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/youruser
+ExecStart=/home/youruser/hermes-claude/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8787
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now hermes-claude.service
+loginctl enable-linger "$USER"   # so it keeps running after you log out (headless)
+```
+
+Notes:
+- The unit reads config from `.env` via `EnvironmentFile`.
+- It launches `python -m uvicorn` directly, and uvicorn already auto-selects
+  uvloop when installed. To pin the fast loop deterministically, add
+  `--loop uvloop --http httptools` to `ExecStart` or switch it to the
+  `claude-code-interface` console script.
+- There is no `--reload`: editing files on disk does not affect the running
+  process until you restart the unit.
+
+### Windows
+
+Register the same `python -m uvicorn …` command with Task Scheduler ("At log
+on") or a service wrapper such as NSSM / WinSW. Point the working directory at
+the repo so the `.env` file is picked up.
+
+## Test
+
+Linux / macOS (`.venv/bin/python`) or Windows (`.venv\Scripts\python`):
+
+```bash
+python -m pytest -q                     # unit tests (no CLI needed)
+python tests/scripts/e2e_autonomous.py  # live: text, needs a running server
+python tests/scripts/e2e_tool.py        # live: full tool loop
+```
+
+### Benchmark
+
+`scripts/bench.py` launches its **own** throwaway uvicorn instance (never touches
+a running server), fires representative autonomous / tool / continuation turns
+with `CCI_TIMING_LOG=1`, and writes p50/p95 of spawn / TTFT / total / throughput
+to JSON:
+
+```bash
+python scripts/bench.py --port 8799 --iters 3 --out bench.json
+# compare warm pool vs cold:
+CCI_WARM_POOL_SIZE=2 python scripts/bench.py --port 8799 --iters 6
+```
+
+It sets `CCI_PORT` (not just `--port`) so the per-conversation MCP callback URL
+the spawned `claude` dials self-matches the throwaway port.
+
+## How it works
+
+```
+OpenAI client ──HTTP /v1──▶ hermes-claude ──stream-json (stdin/stdout)──▶ claude CLI
+       ▲                         │                                         │
+       └──── tool_calls ─────────┤            mcp__hermes__* tool call     │
+       │                         │◀──────── in-process MCP bridge ◀────────┘
+       └──── tool result ───────▶┘            (/mcp/<conv_id>, loopback)
+```
+
+- **Autonomous turn** (no `tools`): the conversation is folded into one user turn
+  for a fresh subprocess; streamed text becomes SSE or a single JSON completion.
+- **Tool turn:** a conversation owns one subprocess + an MCP bridge. When Claude
+  calls a tool, the subprocess blocks inside the MCP call; the server returns a
+  `tool_calls` response and parks the conversation `SUSPENDED`. The next request
+  (carrying the tool results) resolves the pending futures and the same
+  subprocess resumes. Matching is by `tool_call_id`.
+- A background GC reaps suspended-too-long and idle conversations.
+
+## Upgrading
+
+After pulling a new version, reinstall and **restart the server process** —
+a running uvicorn keeps serving the old code until restarted:
+
+```bash
+python -m pip install -e ".[dev]"
+# then restart the service / uvicorn process
+```
